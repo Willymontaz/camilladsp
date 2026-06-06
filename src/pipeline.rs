@@ -96,6 +96,14 @@ impl FilterGroup {
                 config::Filter::Limiter { parameters, .. } => {
                     Box::new(filters::limiter::Limiter::from_config(name, parameters))
                 }
+                config::Filter::TubeStage { parameters, .. } => {
+                    Box::new(filters::tubestage::TubeStage::from_config(
+                        name,
+                        parameters,
+                        sample_freq,
+                        waveform_length,
+                    ))
+                }
             };
             filters.push(filter);
         }

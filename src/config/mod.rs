@@ -1016,6 +1016,11 @@ pub enum Filter {
         description: Option<String>,
         parameters: LimiterParameters,
     },
+    TubeStage {
+        #[serde(default)]
+        description: Option<String>,
+        parameters: TubeStageParameters,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1609,6 +1614,255 @@ pub struct LimiterParameters {
 impl LimiterParameters {
     pub fn soft_clip(&self) -> bool {
         self.soft_clip.unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub enum OversamplingBackend {
+    Rubato,
+    HalfbandFir,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub enum OversamplingFactor {
+    #[serde(rename = "1")]
+    F1,
+    #[serde(rename = "2")]
+    F2,
+    #[serde(rename = "4")]
+    F4,
+    #[serde(rename = "8")]
+    F8,
+}
+
+impl OversamplingFactor {
+    pub fn value(&self) -> usize {
+        match self {
+            OversamplingFactor::F1 => 1,
+            OversamplingFactor::F2 => 2,
+            OversamplingFactor::F4 => 4,
+            OversamplingFactor::F8 => 8,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OversamplingParameters {
+    #[serde(default)]
+    pub factor: Option<OversamplingFactor>,
+    #[serde(default)]
+    pub backend: Option<OversamplingBackend>,
+}
+
+impl OversamplingParameters {
+    pub fn factor(&self) -> usize {
+        self.factor.unwrap_or(OversamplingFactor::F4).value()
+    }
+
+    pub fn backend(&self) -> OversamplingBackend {
+        self.backend.unwrap_or(OversamplingBackend::HalfbandFir)
+    }
+}
+
+impl Default for OversamplingParameters {
+    fn default() -> Self {
+        OversamplingParameters {
+            factor: Some(OversamplingFactor::F4),
+            backend: Some(OversamplingBackend::HalfbandFir),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TransformerParameters {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub hf_shelf_freq: Option<PrcFmt>,
+    #[serde(default)]
+    pub hf_shelf_gain_db: Option<PrcFmt>,
+}
+
+impl TransformerParameters {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn hf_shelf_freq(&self) -> PrcFmt {
+        self.hf_shelf_freq.unwrap_or(8000.0)
+    }
+
+    pub fn hf_shelf_gain_db(&self) -> PrcFmt {
+        self.hf_shelf_gain_db.unwrap_or(-1.5)
+    }
+}
+
+impl Default for TransformerParameters {
+    fn default() -> Self {
+        TransformerParameters {
+            enabled: Some(true),
+            hf_shelf_freq: Some(8000.0),
+            hf_shelf_gain_db: Some(-1.5),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+#[serde(deny_unknown_fields)]
+pub enum TubeModel {
+    Polynomial(PolynomialModelParameters),
+    Triode(TriodeModelParameters),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PolynomialModelParameters {
+    #[serde(default)]
+    pub drive_db: Option<PrcFmt>,
+    #[serde(default)]
+    pub bias: Option<PrcFmt>,
+    #[serde(default)]
+    pub k2: Option<PrcFmt>,
+    #[serde(default)]
+    pub k3: Option<PrcFmt>,
+    #[serde(default)]
+    pub k4: Option<PrcFmt>,
+}
+
+impl PolynomialModelParameters {
+    pub fn drive_db(&self) -> PrcFmt {
+        self.drive_db.unwrap_or(6.0)
+    }
+
+    pub fn bias(&self) -> PrcFmt {
+        self.bias.unwrap_or(0.05)
+    }
+
+    pub fn k2(&self) -> PrcFmt {
+        self.k2.unwrap_or(0.15)
+    }
+
+    pub fn k3(&self) -> PrcFmt {
+        self.k3.unwrap_or(0.02)
+    }
+
+    pub fn k4(&self) -> PrcFmt {
+        self.k4.unwrap_or(0.0)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TriodeModelParameters {
+    // Koren equation parameters (defaults from 300B datasheet, Yeh thesis Tab. 3.2)
+    #[serde(default)]
+    pub mu: Option<PrcFmt>,
+    #[serde(default)]
+    pub kp: Option<PrcFmt>,
+    #[serde(default)]
+    pub kvb: Option<PrcFmt>,
+    #[serde(default)]
+    pub kg1: Option<PrcFmt>,
+    #[serde(default)]
+    pub x: Option<PrcFmt>,
+    #[serde(default)]
+    pub vbias: Option<PrcFmt>,
+    #[serde(default)]
+    pub vplate: Option<PrcFmt>,
+    #[serde(default)]
+    pub drive_db: Option<PrcFmt>,
+    #[serde(default)]
+    pub cathode_bypass_freq: Option<PrcFmt>,
+    #[serde(default)]
+    pub coupling_freq_in: Option<PrcFmt>,
+    #[serde(default)]
+    pub coupling_freq_out: Option<PrcFmt>,
+    #[serde(default)]
+    pub sag_amount: Option<PrcFmt>,
+}
+
+impl TriodeModelParameters {
+    pub fn mu(&self) -> PrcFmt {
+        self.mu.unwrap_or(3.85)
+    }
+
+    pub fn kp(&self) -> PrcFmt {
+        self.kp.unwrap_or(4.5)
+    }
+
+    pub fn kvb(&self) -> PrcFmt {
+        self.kvb.unwrap_or(140.0)
+    }
+
+    pub fn kg1(&self) -> PrcFmt {
+        self.kg1.unwrap_or(1500.0)
+    }
+
+    pub fn x(&self) -> PrcFmt {
+        self.x.unwrap_or(1.4)
+    }
+
+    pub fn vbias(&self) -> PrcFmt {
+        self.vbias.unwrap_or(-60.0)
+    }
+
+    pub fn vplate(&self) -> PrcFmt {
+        self.vplate.unwrap_or(300.0)
+    }
+
+    pub fn drive_db(&self) -> PrcFmt {
+        self.drive_db.unwrap_or(0.0)
+    }
+
+    pub fn cathode_bypass_freq(&self) -> PrcFmt {
+        self.cathode_bypass_freq.unwrap_or(50.0)
+    }
+
+    pub fn coupling_freq_in(&self) -> PrcFmt {
+        self.coupling_freq_in.unwrap_or(10.0)
+    }
+
+    pub fn coupling_freq_out(&self) -> PrcFmt {
+        self.coupling_freq_out.unwrap_or(10.0)
+    }
+
+    pub fn sag_amount(&self) -> PrcFmt {
+        self.sag_amount.unwrap_or(0.0)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TubeStageParameters {
+    pub model: TubeModel,
+    #[serde(default)]
+    pub transformer: Option<TransformerParameters>,
+    #[serde(default)]
+    pub dc_blocker: Option<bool>,
+    #[serde(default)]
+    pub makeup_gain_db: Option<PrcFmt>,
+    #[serde(default)]
+    pub oversampling: Option<OversamplingParameters>,
+}
+
+impl TubeStageParameters {
+    pub fn dc_blocker(&self) -> bool {
+        self.dc_blocker.unwrap_or(true)
+    }
+
+    pub fn makeup_gain_db(&self) -> PrcFmt {
+        self.makeup_gain_db.unwrap_or(0.0)
+    }
+
+    pub fn transformer(&self) -> TransformerParameters {
+        self.transformer.clone().unwrap_or_default()
+    }
+
+    pub fn oversampling(&self) -> OversamplingParameters {
+        self.oversampling.clone().unwrap_or_default()
     }
 }
 

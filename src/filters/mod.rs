@@ -22,6 +22,7 @@ pub mod dither;
 pub mod fftconv;
 pub mod limiter;
 pub mod loudness;
+pub mod tubestage;
 
 use crate::config;
 use crate::config::BinarySampleFormat;
@@ -230,6 +231,7 @@ pub fn validate_filter(fs: usize, filter_config: &config::Filter) -> Res<()> {
             biquadcombo::validate_config(fs, parameters)
         }
         config::Filter::Limiter { parameters, .. } => limiter::validate_config(parameters),
+        config::Filter::TubeStage { parameters, .. } => tubestage::validate_config(fs, parameters),
     }
 }
 
