@@ -1,3 +1,6 @@
+pub mod isp_guard;
+pub mod polyphase;
+
 use crate::PrcFmt;
 use crate::ProcessingParameters;
 use crate::audiochunk::AudioChunk;
@@ -6,6 +9,8 @@ use crate::utils::stash::{container_from_stash, recycle_container, vec_from_stas
 use audioadapter_buffers::direct::{
     InterleavedSlice, SequentialSliceOfVecs, SparseSequentialSliceOfVecs,
 };
+use isp_guard::IspGuard;
+use polyphase::PolyphaseFir;
 use rubato::{
     Async, Fft, FixedAsync, FixedSync, Indexing, PolynomialDegree, Resampler,
     SincInterpolationParameters, SincInterpolationType, WindowFunction, calculate_cutoff,
@@ -28,6 +33,14 @@ pub fn resampler_is_async(conf: &Option<config::Resampler>) -> bool {
         &conf,
         Some(config::Resampler::AsyncSinc { .. }) | Some(config::Resampler::AsyncPoly { .. })
     )
+}
+
+/// Returns true if the resampler config can support `rate_adjust: true`.
+/// The new `Polyphase` engine has a fixed-at-construction ratio and explicitly
+/// opts out (see [`PolyphaseFir::set_resample_ratio`]); use `AsyncSinc` for
+/// streamer setups that need clock-drift tracking.
+pub fn resampler_supports_rate_adjust(conf: &Option<config::Resampler>) -> bool {
+    !matches!(conf, Some(config::Resampler::Polyphase { .. }))
 }
 
 pub fn new_async_sinc_parameters(
@@ -222,6 +235,45 @@ pub fn new_resampler(
             overloaded_chunks: 0,
             processing_params: processing_params.clone(),
         }),
+        Some(config::Resampler::Polyphase {
+            character,
+            taps,
+            oversampling,
+            isp_guard,
+        }) => {
+            debug!(
+                "Creating Polyphase resampler: character={character:?}, taps={taps}, oversampling={oversampling}, isp_guard={isp_guard:?}"
+            );
+            let poly = PolyphaseFir::new(
+                capture_samplerate,
+                samplerate,
+                chunksize,
+                num_channels,
+                *character,
+                *taps,
+                *oversampling,
+            )
+            .unwrap_or_else(|err| panic!("Failed to construct Polyphase resampler: {err}"));
+            let inner: Box<dyn Resampler<PrcFmt>> = Box::new(poly);
+            let final_resampler: Box<dyn Resampler<PrcFmt>> = match isp_guard {
+                Some(cfg) if cfg.enabled() => Box::new(IspGuard::new(
+                    inner,
+                    cfg.ceiling_dbfs(),
+                    cfg.release_ms(),
+                    true,
+                    samplerate,
+                    processing_params.clone(),
+                )),
+                _ => inner,
+            };
+            Some(ChunkResampler {
+                resampler: final_resampler,
+                indexing,
+                secs_per_chunk,
+                overloaded_chunks: 0,
+                processing_params: processing_params.clone(),
+            })
+        }
         None => None,
     }
 }

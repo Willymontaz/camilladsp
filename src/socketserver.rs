@@ -154,6 +154,7 @@ enum WsCommand {
     GetAvailablePlaybackDevices(String),
     GetProcessingLoad,
     GetResamplerLoad,
+    GetIspAttenuation,
     Exit,
     Stop,
     None,
@@ -454,6 +455,10 @@ enum WsReply {
         value: f32,
     },
     GetResamplerLoad {
+        result: WsResult,
+        value: f32,
+    },
+    GetIspAttenuation {
         result: WsResult,
         value: f32,
     },
@@ -1635,6 +1640,13 @@ fn handle_command(
             Some(WsReply::GetResamplerLoad {
                 result: WsResult::Ok,
                 value: load,
+            })
+        }
+        WsCommand::GetIspAttenuation => {
+            let atten_db = shared_data_inst.processing_params.isp_attenuation();
+            Some(WsReply::GetIspAttenuation {
+                result: WsResult::Ok,
+                value: atten_db,
             })
         }
         WsCommand::None => None,

@@ -1,0 +1,47 @@
+---
+# Audiophile polyphase FIR resampler example.
+#
+# Polyphase is a fixed-ratio engine (input_rate -> output_rate is locked at
+# construction). It does NOT support `rate_adjust: true` (loopback / clock
+# correction); use AsyncSinc for that. If you switch capture samplerate via
+# `follow_capture_samplerate`, the engine is rebuilt at the new rate.
+#
+# Suggested defaults:
+#   character: LinearPhase   (audibly transparent, default in literature)
+#   taps: 256                (>= 120 dB stopband at oversampling 256)
+#   oversampling: 256        (cubic Lagrange between branches keeps the
+#                            interpolation error well below the filter floor)
+#   isp_guard.ceiling_dbfs: -1.0  (DAC-safe headroom)
+#
+# Alternative characters:
+#   MinimumPhase   front-loaded impulse, no pre-ring; some prefer it for
+#                  percussive content. Phase response is non-linear.
+#   Apodizing      gentler transition that suppresses pre-ringing introduced
+#                  upstream (CD masters, brick-wall mixes).
+#   SlowRollOff    very short impulse, mild high-frequency rolloff above
+#                  ~0.45 fs/2; prioritises time-domain fidelity.
+#
+devices:
+  samplerate: 96000
+  chunksize: 1024
+  capture_samplerate: 44100
+  enable_rate_adjust: false
+  resampler:
+    type: Polyphase
+    character: LinearPhase
+    taps: 256
+    oversampling: 256
+    isp_guard:
+      enabled: true
+      ceiling_dbfs: -1.0
+      release_ms: 50.0
+  capture:
+    type: RawFile
+    filename: "dummy"
+    channels: 2
+    format: S16_LE
+  playback:
+    type: File
+    filename: "dummy"
+    channels: 2
+    format: S16_LE

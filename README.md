@@ -1491,8 +1491,9 @@ The resampler type is given by `type`, and the available options are:
 * AsyncSinc
 * AsyncPoly
 * Synchronous
+* Polyphase
 
-The types `AsyncPoly` and `AsyncSinc` need additional parameters, see each type below for details.
+The types `AsyncPoly`, `AsyncSinc` and `Polyphase` need additional parameters, see each type below for details.
 
 ### `AsyncSinc`: Asynchronous resampling with anti-aliasing
 
@@ -1612,14 +1613,75 @@ The `Synchronous` type takes no additional parameters:
     type: Synchronous
 ```
 
+### `Polyphase`: Audiophile fixed-ratio polyphase FIR
+
+The `Polyphase` resampler is a long-tap polyphase FIR engine intended for
+audiophile playback chains where filter character matters. The ratio is
+**fixed** at construction (use `AsyncSinc` if `enable_rate_adjust: true` is
+needed). When `follow_capture_samplerate` is on, the engine is rebuilt at the
+new rate.
+
+Parameters:
+
+| Parameter      | Required | Default | Description                                                                       |
+|----------------|:--------:|:-------:|-----------------------------------------------------------------------------------|
+| `character`    | yes      | -       | Filter character: `LinearPhase`, `MinimumPhase`, `Apodizing`, `SlowRollOff`.      |
+| `taps`         | no       | 256     | Per-branch tap count. With `oversampling = 256`, the prototype has ~65k taps.     |
+| `oversampling` | no       | 256     | Number of polyphase branches. Cubic Lagrange interpolates between branches.       |
+| `isp_guard`    | no       | none    | Optional intersample-peak guard, see below.                                       |
+
+Available filter characters:
+
+* `LinearPhase` - symmetric impulse response, no phase distortion. The default
+  recommendation in the literature; transparent to almost all listeners.
+* `MinimumPhase` - front-loaded impulse with no pre-ring; some prefer it for
+  percussive material. Phase response is non-linear (group delay is frequency
+  dependent).
+* `Apodizing` - gentler transition band that suppresses pre-ringing introduced
+  upstream (CD masters, brick-wall mixes).
+* `SlowRollOff` - very short impulse, mild high-frequency rolloff above
+  ~0.45 fs/2; prioritises time-domain fidelity.
+
+Example:
+```
+  resampler:
+    type: Polyphase
+    character: LinearPhase
+    taps: 256
+    oversampling: 256
+    isp_guard:
+      enabled: true
+      ceiling_dbfs: -1.0
+      release_ms: 50.0
+```
+
+#### Intersample-peak (ISP) guard
+
+When `isp_guard` is enabled, the resampler watches the 4x-oversampled output
+for inter-sample peaks that would clip a downstream DAC's reconstruction
+filter and applies a fast-attack / slow-release attenuation to keep all true
+peaks below `ceiling_dbfs` (relative to 0 dBFS). The currently applied
+attenuation in dB is surfaced on the websocket as the `isp_attenuation`
+processing parameter, so a monitor UI can show DAC-protect headroom.
+
+| Field          | Default | Description                                              |
+|----------------|:-------:|----------------------------------------------------------|
+| `enabled`      | false   | Set to `true` to activate the guard.                     |
+| `ceiling_dbfs` | -1.0    | Output ceiling in dBFS (must be <= 0.0).                 |
+| `release_ms`   | 50.0    | Release time constant for restoring gain after a peak.   |
+
+A full example configuration is provided at
+[exampleconfigs/audiophile_resample.yml](exampleconfigs/audiophile_resample.yml).
+
 ### Rate adjust via resampling
 When using the rate adjust feature to match capture and playback devices,
 one of the "Async" types must be used.
 These asynchronous resamplers do not rely on a fixed resampling ratio.
 When rate adjust is enabled the resampling ratio is dynamically adjusted in order to compensate
 for drifts and mismatches between the input and output sample clocks.
-Using the "Synchronous" type with rate adjust enabled will print warnings,
-and any rate adjust request will be ignored.
+Using the "Synchronous" or "Polyphase" type with rate adjust enabled is rejected at
+config validation time (these have a fixed ratio and would have to be rebuilt
+to track drift, which would defeat their purpose).
 The next section explains the rate-adjust logic in detail.
 
 ## Rate adjust: what problem it solves, and how it works

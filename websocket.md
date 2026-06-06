@@ -128,6 +128,9 @@ Commands for reading and changing settings for the websocket server.
 - `ResetClippedSamples` : reset the clipped samples counter to zero.
 - `GetProcessingLoad` : get the current pipeline processing capacity utilization in percent.
 - `GetResamplerLoad` : get the current resampler processing capacity utilization in percent.
+- `GetIspAttenuation` : get the gain reduction in dB currently applied by the resampler's
+  intersample-peak guard. `0.0` means no limiting; negative values mean the guard is active.
+  Always `0.0` when the guard is disabled or not present.
 - `GetStateFilePath` : get the current state file path, returns null if no state file is used.
 - `GetStateFileUpdated` : check if all changes have been saved to the state file.
 

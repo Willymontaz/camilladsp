@@ -960,6 +960,74 @@ pub enum Resampler {
     },
     AsyncSinc(AsyncSincParameters),
     Synchronous,
+    /// Audiophile-grade polyphase FIR resampler with selectable filter
+    /// character and an optional intersample-peak guard. The ratio is fixed
+    /// at construction; use `AsyncSinc` if `rate_adjust: true` is required.
+    Polyphase {
+        character: PolyphaseCharacter,
+        #[serde(default = "default_polyphase_taps")]
+        taps: usize,
+        #[serde(default = "default_polyphase_oversampling")]
+        oversampling: usize,
+        #[serde(default)]
+        isp_guard: Option<IspGuardConfig>,
+    },
+}
+
+fn default_polyphase_taps() -> usize {
+    256
+}
+
+fn default_polyphase_oversampling() -> usize {
+    256
+}
+
+/// Filter character for the [`Resampler::Polyphase`] engine.
+///
+/// * `LinearPhase` - long symmetric Kaiser sinc. Reference quality, accepts
+///   the usual linear-phase pre-ring.
+/// * `MinimumPhase` - cepstral spectral factorization of `LinearPhase`. Same
+///   magnitude response, all energy at the front (no pre-ring).
+/// * `Apodizing` - shorter asymmetric Kaiser, gentle transition, designed to
+///   reduce ringing from upstream linear-phase stages.
+/// * `SlowRollOff` - short Hann-windowed sinc; trades stopband attenuation
+///   for compact impulse response.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PolyphaseCharacter {
+    LinearPhase,
+    MinimumPhase,
+    Apodizing,
+    SlowRollOff,
+}
+
+/// Optional intersample-peak guard configuration for [`Resampler::Polyphase`].
+///
+/// When enabled (the default when this section is present), the resampler
+/// output is run through a 4x oversampled true-peak detector and a lookahead
+/// limiter that caps the signal at `ceiling_dbfs` (default -0.5 dBFS).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct IspGuardConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub ceiling_dbfs: Option<f64>,
+    #[serde(default)]
+    pub release_ms: Option<f64>,
+}
+
+impl IspGuardConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn ceiling_dbfs(&self) -> f64 {
+        self.ceiling_dbfs.unwrap_or(-0.5)
+    }
+
+    pub fn release_ms(&self) -> f64 {
+        self.release_ms.unwrap_or(50.0)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

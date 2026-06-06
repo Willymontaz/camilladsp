@@ -256,6 +256,10 @@ pub struct ProcessingParameters {
     mute: [AtomicBool; Self::NUM_FADERS],
     processing_load: AtomicU32,
     resampler_load: AtomicU32,
+    // Current attenuation applied by the resampler's intersample-peak guard,
+    // in dB (0.0 == no limiting, negative == limiting active). Surfaced to
+    // the websocket so monitoring tools can show DAC-protect headroom.
+    isp_attenuation: AtomicU32,
 }
 
 impl ProcessingParameters {
@@ -289,6 +293,7 @@ impl ProcessingParameters {
             ],
             processing_load: AtomicU32::new(0.0f32.to_bits()),
             resampler_load: AtomicU32::new(0.0f32.to_bits()),
+            isp_attenuation: AtomicU32::new(0.0f32.to_bits()),
         }
     }
 
@@ -355,6 +360,18 @@ impl ProcessingParameters {
 
     pub fn resampler_load(&self) -> f32 {
         f32::from_bits(self.resampler_load.load(Ordering::Relaxed))
+    }
+
+    /// Set the current attenuation in dB applied by the resampler's
+    /// intersample-peak guard (0.0 means no limiting, negative values mean
+    /// limiting is active to protect downstream DAC headroom).
+    pub fn set_isp_attenuation(&self, attenuation_db: f32) {
+        self.isp_attenuation
+            .store(attenuation_db.to_bits(), Ordering::Relaxed)
+    }
+
+    pub fn isp_attenuation(&self) -> f32 {
+        f32::from_bits(self.isp_attenuation.load(Ordering::Relaxed))
     }
 }
 
