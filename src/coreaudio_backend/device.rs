@@ -48,7 +48,9 @@ use coreaudio::error::AudioCodecError;
 use coreaudio::error::Error as CoreAudioError;
 
 use libc::pid_t;
-use objc2_audio_toolbox::{kAudioCodecUnknownPropertyError, kAudioUnitProperty_StreamFormat};
+use objc2_audio_toolbox::{
+    kAudioCodecUnknownPropertyError, kAudioUnitProperty_SampleRate, kAudioUnitProperty_StreamFormat,
+};
 use objc2_core_audio::{
     AudioDeviceID, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData, kAudioDevicePropertyClockSource,
@@ -66,6 +68,7 @@ use audio_thread_priority::{
 };
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::PrcFmt;
 use crate::ProcessingParameters;
 use crate::ProcessingState;
@@ -165,6 +168,8 @@ pub struct CoreaudioCaptureDevice {
     pub silence_timeout: PrcFmt,
     pub stop_on_rate_change: bool,
     pub rate_measure_interval: f32,
+    pub enable_rate_adjust: bool,
+    pub follow_capture_samplerate: bool,
 }
 
 pub fn list_device_names(input: bool) -> Vec<String> {
@@ -310,10 +315,11 @@ fn open_coreaudio_playback(
 
 fn open_coreaudio_capture(
     devname: &Option<String>,
-    samplerate: usize,
+    configured_samplerate: usize,
+    follow_capture_samplerate: bool,
     channels: usize,
     sample_format: &Option<CoreAudioSampleFormat>,
-) -> Res<(AudioUnit, AudioDeviceID)> {
+) -> Res<(AudioUnit, AudioDeviceID, usize)> {
     let device_id = if let Some(name) = devname {
         debug!("Available capture devices: {:?}.", list_device_names(true));
         match get_device_id_from_name_and_scope(name, true) {
@@ -335,6 +341,19 @@ fn open_coreaudio_capture(
 
     let mut audio_unit = audio_unit_from_device_id(device_id, true)
         .map_err(|e| ConfigError::new(&format!("{e}")))?;
+
+    let samplerate: usize = if follow_capture_samplerate {
+        let sr_hz: f64 = audio_unit
+            .get_property(kAudioUnitProperty_SampleRate, Scope::Output, Element::Input)
+            .map_err(|e| ConfigError::new(&format!("{e}")))?;
+        let detected = sr_hz.round() as usize;
+        info!(
+            "Following capture device sample rate, detected {detected} Hz (configured {configured_samplerate} Hz ignored)."
+        );
+        detected
+    } else {
+        configured_samplerate
+    };
 
     if let Some(sfmt) = sample_format {
         let phys_format = match *sfmt {
@@ -384,7 +403,7 @@ fn open_coreaudio_capture(
         .map_err(|e| ConfigError::new(&format!("{e}")))?;
 
     debug!("Opened CoreAudio capture device {devname:?}.");
-    Ok((audio_unit, device_id))
+    Ok((audio_unit, device_id, samplerate))
 }
 
 enum PlaybackDeviceMessage {
@@ -709,13 +728,14 @@ impl CaptureDevice for CoreaudioCaptureDevice {
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
     ) -> Res<Box<thread::JoinHandle<()>>> {
         let devname = self.devname.clone();
         let samplerate = self.samplerate;
-        let capture_samplerate = self.capture_samplerate;
+        let configured_capture_samplerate = self.capture_samplerate;
         let chunksize = self.chunksize;
         let channels = self.channels;
         let sample_format = self.sample_format;
@@ -725,24 +745,47 @@ impl CaptureDevice for CoreaudioCaptureDevice {
         let silence_threshold = self.silence_threshold;
         let stop_on_rate_change = self.stop_on_rate_change;
         let rate_measure_interval = (1000.0 * self.rate_measure_interval) as u64;
+        let enable_rate_adjust = self.enable_rate_adjust;
+        let follow_capture_samplerate = self.follow_capture_samplerate;
         let blockalign = 4 * channels;
 
         let handle = thread::Builder::new()
             .name("CoreaudioCapture".to_string())
             .spawn(move || {
-                let mut resampler = new_resampler(
-                        &resampler_config,
-                        channels,
-                        samplerate,
-                        capture_samplerate,
-                        chunksize,
-                    processing_params.clone(),
-                    );
-                // Rough guess of the number of frames per callback. 
+                // Rough guess of the number of frames per callback.
                 //let callback_frames = samplerate / 85;
                 let callback_frames = 512;
                 // TODO check if always 512!
                 //trace!("Estimated playback callback period to {} frames", callback_frames);
+
+                trace!("Build input stream.");
+                let (mut audio_unit, device_id, capture_samplerate) = match open_coreaudio_capture(
+                    &devname,
+                    configured_capture_samplerate,
+                    follow_capture_samplerate,
+                    channels,
+                    &sample_format,
+                ) {
+                    Ok(tup) => tup,
+                    Err(err) => {
+                        status_channel
+                            .send(StatusMessage::CaptureError(err.to_string()))
+                            .unwrap_or(());
+                        barrier.wait();
+                        return;
+                    }
+                };
+
+                let mut resampler = new_resampler(
+                    &resampler_config,
+                    channels,
+                    samplerate,
+                    capture_samplerate,
+                    chunksize,
+                    enable_rate_adjust,
+                    processing_params.clone(),
+                );
+
                 let channel_capacity = if let Some(resamp) = &resampler {
                     let max_input_frames = resamp.resampler.input_frames_max();
                     32*(chunksize + max_input_frames)/callback_frames + 10
@@ -764,18 +807,6 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                 };
                 let ringbuffer = HeapRb::<u8>::new(blockalign * ( 2 * buffer_capacity_frames + 2 * callback_frames ));
                 let (mut device_producer, mut device_consumer) = ringbuffer.split();
-
-                trace!("Build input stream.");
-                let (mut audio_unit, device_id) = match open_coreaudio_capture(&devname, capture_samplerate, channels, &sample_format) {
-                    Ok(audio_unit) => audio_unit,
-                    Err(err) => {
-                        status_channel
-                            .send(StatusMessage::CaptureError(err.to_string()))
-                            .unwrap_or(());
-                        barrier.wait();
-                        return;
-                    }
-                };
 
                 let mut chunk_counter = 0;
 
@@ -924,7 +955,14 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                             debug!("Capture rate change event, new rate: {rate}.");
                             if rate as usize != capture_samplerate {
                                 channel.send(AudioMessage::EndOfStream).unwrap_or(());
-                                status_channel.send(StatusMessage::CaptureFormatChange(rate as usize)).unwrap_or(());
+                                if follow_capture_samplerate {
+                                    info!("Capture device sample rate changed to {rate} Hz, scheduling pipeline restart.");
+                                    ctrl_channel
+                                        .send(ControllerMessage::CaptureSampleRateChanged(rate as usize))
+                                        .unwrap_or(());
+                                } else {
+                                    status_channel.send(StatusMessage::CaptureFormatChange(rate as usize)).unwrap_or(());
+                                }
                                 break;
                             }
                         },

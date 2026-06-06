@@ -35,6 +35,7 @@ use std::time::Duration;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::PrcFmt;
 use crate::ProcessingState;
 use crate::Res;
@@ -87,6 +88,7 @@ pub struct FileCaptureDevice {
     pub read_bytes: usize,
     pub stop_on_rate_change: bool,
     pub rate_measure_interval: f32,
+    pub enable_rate_adjust: bool,
 }
 
 struct CaptureChannels {
@@ -537,6 +539,7 @@ impl CaptureDevice for FileCaptureDevice {
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        _ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -581,6 +584,7 @@ impl CaptureDevice for FileCaptureDevice {
         let silence_threshold = self.silence_threshold;
         let stop_on_rate_change = self.stop_on_rate_change;
         let rate_measure_interval = self.rate_measure_interval;
+        let enable_rate_adjust = self.enable_rate_adjust;
         let handle = thread::Builder::new()
             .name("FileCapture".to_string())
             .spawn(move || {
@@ -590,6 +594,7 @@ impl CaptureDevice for FileCaptureDevice {
                     samplerate,
                     capture_samplerate,
                     chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                 );
                 let params = CaptureParams {

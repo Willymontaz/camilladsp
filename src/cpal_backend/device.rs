@@ -43,6 +43,7 @@ use std::thread;
 use std::time;
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::NewValue;
 use crate::PrcFmt;
 use crate::ProcessingParameters;
@@ -94,6 +95,7 @@ pub struct CpalCaptureDevice {
     pub silence_timeout: PrcFmt,
     pub stop_on_rate_change: bool,
     pub rate_measure_interval: f32,
+    pub enable_rate_adjust: bool,
 }
 
 fn open_cpal_playback(
@@ -503,6 +505,7 @@ impl CaptureDevice for CpalCaptureDevice {
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        _ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -521,6 +524,7 @@ impl CaptureDevice for CpalCaptureDevice {
         let silence_threshold = self.silence_threshold;
         let stop_on_rate_change = self.stop_on_rate_change;
         let rate_measure_interval = self.rate_measure_interval;
+        let enable_rate_adjust = self.enable_rate_adjust;
         let handle = thread::Builder::new()
             .name("CpalCapture".to_string())
             .spawn(move || {
@@ -530,6 +534,7 @@ impl CaptureDevice for CpalCaptureDevice {
                         samplerate,
                         capture_samplerate,
                         chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                     );
                 match open_cpal_capture(host_cfg, &devname, capture_samplerate, channels, &sample_format) {

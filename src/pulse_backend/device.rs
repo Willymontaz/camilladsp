@@ -32,6 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::PrcFmt;
 use crate::ProcessingParameters;
 use crate::ProcessingState;
@@ -84,6 +85,7 @@ pub struct PulseCaptureDevice {
     pub channels: usize,
     pub silence_threshold: PrcFmt,
     pub silence_timeout: PrcFmt,
+    pub enable_rate_adjust: bool,
 }
 
 /// Open a PulseAudio device
@@ -253,6 +255,7 @@ impl CaptureDevice for PulseCaptureDevice {
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        _ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -277,6 +280,7 @@ impl CaptureDevice for PulseCaptureDevice {
         let async_src = resampler_is_async(&resampler_config);
         let silence_timeout = self.silence_timeout;
         let silence_threshold = self.silence_threshold;
+        let enable_rate_adjust = self.enable_rate_adjust;
         let handle = thread::Builder::new()
             .name("PulseCapture".to_string())
             .spawn(move || {
@@ -286,6 +290,7 @@ impl CaptureDevice for PulseCaptureDevice {
                         samplerate,
                         capture_samplerate,
                         chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                     );
                 match open_pulse(

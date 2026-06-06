@@ -142,8 +142,12 @@ pub fn new_resampler(
     samplerate: usize,
     capture_samplerate: usize,
     chunksize: usize,
+    rate_adjust: bool,
     processing_params: Arc<ProcessingParameters>,
 ) -> Option<ChunkResampler> {
+    if samplerate == capture_samplerate && !rate_adjust {
+        return None;
+    }
     let secs_per_chunk = chunksize as f32 / samplerate as f32;
     let indexing = Indexing {
         input_offset: 0,

@@ -39,6 +39,7 @@ use audio_thread_priority::{
 };
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::PrcFmt;
 use crate::ProcessingParameters;
 use crate::ProcessingState;
@@ -81,6 +82,7 @@ pub struct WasapiCaptureDevice {
     pub stop_on_rate_change: bool,
     pub rate_measure_interval: f32,
     pub polling: bool,
+    pub enable_rate_adjust: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1156,6 +1158,7 @@ impl CaptureDevice for WasapiCaptureDevice {
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        _ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -1175,6 +1178,7 @@ impl CaptureDevice for WasapiCaptureDevice {
         let silence_threshold = self.silence_threshold;
         let stop_on_rate_change = self.stop_on_rate_change;
         let rate_measure_interval = (1000.0 * self.rate_measure_interval) as u64;
+        let enable_rate_adjust = self.enable_rate_adjust;
         let handle = thread::Builder::new()
             .name("WasapiCapture".to_string())
             .spawn(move || {
@@ -1184,6 +1188,7 @@ impl CaptureDevice for WasapiCaptureDevice {
                         samplerate,
                         capture_samplerate,
                         chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                 );
                 // Devices typically give around 1000 frames per buffer, set a reasonable capacity for the channel

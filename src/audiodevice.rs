@@ -51,6 +51,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::Res;
 use crate::StatusMessage;
 use crate::audiochunk::AudioChunk;
@@ -104,11 +105,13 @@ pub trait PlaybackDevice {
 
 /// A capture device
 pub trait CaptureDevice {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -328,6 +331,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             stop_on_inactive: stop_on_inactive.unwrap_or_default(),
             link_volume_control: link_volume_control.clone(),
             link_mute_control: link_mute_control.clone(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         #[cfg(feature = "pulse-backend")]
         config::CaptureDevice::Pulse {
@@ -343,6 +347,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             channels,
             silence_threshold: conf.silence_threshold(),
             silence_timeout: conf.silence_timeout(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         #[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
         config::CaptureDevice::PipeWire {
@@ -364,6 +369,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             channels,
             silence_threshold: conf.silence_threshold(),
             silence_timeout: conf.silence_timeout(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         config::CaptureDevice::RawFile(ref dev) => Box::new(filedevice::FileCaptureDevice {
             source: filedevice::CaptureSource::Filename(dev.filename.clone()),
@@ -380,6 +386,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             read_bytes: dev.read_bytes(),
             stop_on_rate_change: conf.stop_on_rate_change(),
             rate_measure_interval: conf.rate_measure_interval(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         config::CaptureDevice::WavFile(ref dev) => Box::new(filedevice::FileCaptureDevice {
             source: filedevice::CaptureSource::Filename(dev.filename.clone()),
@@ -396,6 +403,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             read_bytes: 0,
             stop_on_rate_change: conf.stop_on_rate_change(),
             rate_measure_interval: conf.rate_measure_interval(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         config::CaptureDevice::Stdin(ref dev) => Box::new(filedevice::FileCaptureDevice {
             source: filedevice::CaptureSource::Stdin,
@@ -412,6 +420,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             read_bytes: dev.read_bytes(),
             stop_on_rate_change: conf.stop_on_rate_change(),
             rate_measure_interval: conf.rate_measure_interval(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         config::CaptureDevice::SignalGenerator {
             signal, channels, ..
@@ -437,6 +446,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             read_bytes: 0,
             stop_on_rate_change: conf.stop_on_rate_change(),
             rate_measure_interval: conf.rate_measure_interval(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         #[cfg(target_os = "macos")]
         config::CaptureDevice::CoreAudio(ref dev) => {
@@ -452,6 +462,8 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
                 silence_timeout: conf.silence_timeout(),
                 stop_on_rate_change: conf.stop_on_rate_change(),
                 rate_measure_interval: conf.rate_measure_interval(),
+                enable_rate_adjust: conf.rate_adjust(),
+                follow_capture_samplerate: conf.follow_capture_samplerate(),
             })
         }
         #[cfg(target_os = "windows")]
@@ -470,6 +482,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             stop_on_rate_change: conf.stop_on_rate_change(),
             rate_measure_interval: conf.rate_measure_interval(),
             polling: dev.is_polling(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
         #[cfg(all(target_os = "windows", feature = "asio-backend"))]
         config::CaptureDevice::Asio(ref dev) => {
@@ -491,6 +504,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
                 stop_on_rate_change: conf.stop_on_rate_change(),
                 rate_measure_interval: conf.rate_measure_interval(),
                 full_duplex,
+                enable_rate_adjust: conf.rate_adjust(),
             })
         }
         #[cfg(all(
@@ -520,6 +534,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
             silence_timeout: conf.silence_timeout(),
             stop_on_rate_change: conf.stop_on_rate_change(),
             rate_measure_interval: conf.rate_measure_interval(),
+            enable_rate_adjust: conf.rate_adjust(),
         }),
     }
 }

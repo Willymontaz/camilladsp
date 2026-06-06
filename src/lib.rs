@@ -170,6 +170,7 @@ pub enum ExitState {
 pub enum ControllerMessage {
     // Config must be boxed, to prevent "large size difference between variants" warning
     ConfigChanged(Box<config::Configuration>),
+    CaptureSampleRateChanged(usize),
     Stop,
     Exit,
 }

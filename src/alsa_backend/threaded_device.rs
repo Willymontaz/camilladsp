@@ -42,6 +42,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::PrcFmt;
 use crate::ProcessingState;
 use crate::Res;
@@ -86,6 +87,7 @@ pub struct AlsaCaptureDevice {
     pub stop_on_inactive: bool,
     pub link_volume_control: Option<String>,
     pub link_mute_control: Option<String>,
+    pub enable_rate_adjust: bool,
 }
 
 #[derive(Debug)]
@@ -1305,6 +1307,7 @@ impl CaptureDevice for AlsaCaptureDevice {
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        _ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -1324,6 +1327,7 @@ impl CaptureDevice for AlsaCaptureDevice {
         let stop_on_inactive = self.stop_on_inactive;
         let link_volume_control = self.link_volume_control.clone();
         let link_mute_control = self.link_mute_control.clone();
+        let enable_rate_adjust = self.enable_rate_adjust;
 
         let handle = thread::Builder::new()
             .name("AlsaCapture".to_string())
@@ -1334,6 +1338,7 @@ impl CaptureDevice for AlsaCaptureDevice {
                     samplerate,
                     capture_samplerate,
                     chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                 );
                 let channel_capacity = if let Some(resamp) = &resampler {

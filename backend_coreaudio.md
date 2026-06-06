@@ -65,6 +65,22 @@ If the capture device sample rate changes, then CamillaDSP will stop.
 Reading the "StopReason" via the websocket server tells that this was due to
 a sample rate change, and gives the value for the new sample rate.
 
+### Following the capture device sample rate
+The optional `follow_capture_samplerate` device-level setting (default `false`)
+changes the behaviour described above when set to `true`:
+- At startup, CamillaDSP reads the current sample rate from the capture device
+  and uses that value as `capture_samplerate` (the configured value is ignored).
+- On a capture device sample rate change, instead of stopping with
+  `StopReason::CaptureFormatChange`, CamillaDSP automatically restarts the
+  pipeline with the new `capture_samplerate` value, leaving the rest of the
+  configuration untouched.
+
+This is useful with sources that change rate dynamically (e.g. a USB DAC that
+follows the source rate). The pipeline `samplerate` (the playback rate) is
+still taken from the configuration, so a resampler is needed in the config to
+cover the cases where the rates differ. CamillaDSP will allocate the resampler
+with the actual capture rate detected on the device.
+
 ## Configuration of devices
 
 This example configuration will be used to explain the various options specific to CoreAudio:
