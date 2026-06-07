@@ -219,6 +219,11 @@ fn run(
                         debug!("Capture sample rate change command received, new rate: {new_rate}");
                         let mut new_conf = active_config.clone();
                         new_conf.devices.capture_samplerate = Some(new_rate);
+                        // Persist the updated config in the shared "previous"
+                        // slot so the outer supervisor loop can recover it if
+                        // PlaybackDone races ahead of ConfigChanged and clears
+                        // active_config before this run() returns.
+                        *shared_configs.previous.lock() = Some(new_conf.clone());
                         if let Err(e) = tx_ctrl.try_send(
                             ControllerMessage::ConfigChanged(Box::new(new_conf)),
                         ) {
@@ -1229,8 +1234,30 @@ fn main_process() -> i32 {
                     debug!("Config change command received");
                     *active_config.lock() = Some(*new_conf);
                 }
-                Ok(ControllerMessage::CaptureSampleRateChanged(_)) => {
-                    debug!("Capture sample rate change command received outside of run loop, ignoring");
+                Ok(ControllerMessage::CaptureSampleRateChanged(new_rate)) => {
+                    // The processing loop has already exited (typically because
+                    // PlaybackDone arrived before the rate-change message was
+                    // turned into a ConfigChanged), so active_config is empty.
+                    // Recover by applying the new rate to the previous config
+                    // and re-arming it as the active one so the supervisor
+                    // restarts the pipeline at the new capture rate. Without
+                    // this, the rate-change request would be silently dropped
+                    // and CamillaDSP would stop (or hang in wait mode).
+                    debug!(
+                        "Capture sample rate change command received outside of run loop, new rate: {new_rate}"
+                    );
+                    let prev = previous_config.lock().clone();
+                    match prev {
+                        Some(mut conf) => {
+                            conf.devices.capture_samplerate = Some(new_rate);
+                            *active_config.lock() = Some(conf);
+                        }
+                        None => {
+                            warn!(
+                                "No previous config available, cannot apply capture sample rate change to {new_rate} Hz"
+                            );
+                        }
+                    }
                 }
                 Ok(ControllerMessage::Stop) => {
                     debug!("Stop command received");

@@ -954,7 +954,15 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                         Ok(rate) => {
                             debug!("Capture rate change event, new rate: {rate}.");
                             if rate as usize != capture_samplerate {
-                                channel.send(AudioMessage::EndOfStream).unwrap_or(());
+                                // Publish the rate change to the supervisor BEFORE
+                                // signalling EndOfStream. EndOfStream propagates
+                                // through processing -> playback and triggers
+                                // PlaybackDone, which clears active_config in the
+                                // supervisor. By landing CaptureSampleRateChanged
+                                // first we maximise the chance the supervisor turns
+                                // it into a queued ConfigChanged before
+                                // PlaybackDone is observed; the outer-loop fallback
+                                // in bin.rs recovers from the race regardless.
                                 if follow_capture_samplerate {
                                     info!("Capture device sample rate changed to {rate} Hz, scheduling pipeline restart.");
                                     ctrl_channel
@@ -963,6 +971,7 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                                 } else {
                                     status_channel.send(StatusMessage::CaptureFormatChange(rate as usize)).unwrap_or(());
                                 }
+                                channel.send(AudioMessage::EndOfStream).unwrap_or(());
                                 break;
                             }
                         },
