@@ -26,13 +26,28 @@
 //! interpolation across branches for arbitrary (non-integer-ratio) resampling.
 //! Quality comes from a long Kaiser prototype designed at init.
 
-use crate::PrcFmt;
 use crate::config;
+use crate::PrcFmt;
 use audioadapter::{Adapter, AdapterMut};
 use num_complex::Complex;
 use rubato::{Indexing, ResampleError, ResampleResult, Resampler};
 use std::f64::consts::PI;
 use std::fmt;
+
+#[cfg(all(target_arch = "aarch64", not(feature = "32bit")))]
+#[path = "polyphase_neon.rs"]
+mod neon;
+
+#[cfg(not(feature = "32bit"))]
+const DIRECT_PHASE_EPSILON: f64 = 1e-10;
+#[cfg(feature = "32bit")]
+const DIRECT_PHASE_EPSILON: f64 = 1e-6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectBranch {
+    branch_idx: usize,
+    sample_shift: isize,
+}
 
 /// A long FIR resampler built from a windowed-sinc prototype, decomposed into
 /// `oversampling` polyphase branches. The output ratio is fixed at construction.
@@ -44,6 +59,9 @@ pub struct PolyphaseFir {
     oversampling: usize,
     /// `output_rate / input_rate`.
     resample_ratio: f64,
+    /// Integer advance in upsampled/polyphase units per output sample when
+    /// `input_rate * oversampling / output_rate` is integral.
+    direct_phase_step: Option<isize>,
     /// Per-channel ring buffer holding the latest input samples. Length is
     /// `taps + max_in_per_call`. We slide window by `consumed` samples per call.
     buffers: Vec<Vec<PrcFmt>>,
@@ -95,13 +113,16 @@ impl PolyphaseFir {
         oversampling: usize,
     ) -> Result<Self, String> {
         if taps == 0 || oversampling == 0 || chunk_size == 0 || nbr_channels == 0 {
-            return Err("PolyphaseFir: taps, oversampling, chunk_size, nbr_channels must all be > 0"
-                .to_string());
+            return Err(
+                "PolyphaseFir: taps, oversampling, chunk_size, nbr_channels must all be > 0"
+                    .to_string(),
+            );
         }
         if input_rate == 0 || output_rate == 0 {
             return Err("PolyphaseFir: sample rates must be > 0".to_string());
         }
         let resample_ratio = output_rate as f64 / input_rate as f64;
+        let direct_phase_step = direct_phase_step(input_rate, output_rate, oversampling);
 
         // Design the prototype lowpass at the upsampled rate. Cutoff is
         // 0.5 * min(1, ratio) / oversampling (in normalized-to-upsampled-rate terms).
@@ -122,8 +143,7 @@ impl PolyphaseFir {
 
         // Headroom for the input-buffer ring: enough samples to produce
         // `chunk_size` output frames at the worst-case ratio, plus the FIR length.
-        let max_in_per_call =
-            (chunk_size as f64 / resample_ratio).ceil() as usize + 4;
+        let max_in_per_call = (chunk_size as f64 / resample_ratio).ceil() as usize + 4;
         let max_buffer_len = taps + max_in_per_call + 4;
         let buffers = vec![vec![0.0 as PrcFmt; max_buffer_len]; nbr_channels];
 
@@ -137,6 +157,7 @@ impl PolyphaseFir {
             taps,
             oversampling,
             resample_ratio,
+            direct_phase_step,
             buffers,
             buffer_fill: 0,
             next_input_pos: 0.0,
@@ -154,8 +175,7 @@ impl PolyphaseFir {
     /// (or zero-padded); only the forward-reaching part (`n_p_max + 1`) needs
     /// to be provided.
     fn input_needed(&self) -> usize {
-        let last_pos =
-            self.next_input_pos + (self.chunk_size - 1) as f64 / self.resample_ratio;
+        let last_pos = self.next_input_pos + (self.chunk_size - 1) as f64 / self.resample_ratio;
         // Worst case: cubic branch interpolation wraps to sample_shift = +1.
         let max_n_p = last_pos.floor() as isize + 1;
         let needed_count = (max_n_p + 1).max(0) as usize;
@@ -163,25 +183,56 @@ impl PolyphaseFir {
     }
 
     /// Evaluate the polyphase FIR at the given fractional input position for one channel.
-    /// Uses cubic Lagrange interpolation across 4 adjacent branches for arbitrary ratios.
+    /// Uses direct branch evaluation when the phase lands on a polyphase branch,
+    /// otherwise falls back to cubic Lagrange interpolation across 4 adjacent branches.
     #[inline]
     fn eval(&self, channel: usize, frac_input_pos: f64) -> PrcFmt {
         let buf = &self.buffers[channel];
         let int_pos = frac_input_pos.floor();
         let frac = frac_input_pos - int_pos; // in [0, 1)
         let center = int_pos as isize;
+        let bf = frac * self.oversampling as f64;
 
+        if let Some(direct) = direct_branch(bf, self.oversampling) {
+            return self.eval_direct(buf, direct.branch_idx, center + direct.sample_shift);
+        }
+
+        self.eval_cubic(buf, center, bf)
+    }
+
+    #[inline]
+    fn eval_direct(&self, buf: &[PrcFmt], branch_idx: usize, n_p: isize) -> PrcFmt {
+        let branch = &self.branches[branch_idx * self.taps..(branch_idx + 1) * self.taps];
+        let (k_start, k_end) = valid_tap_range(n_p, buf.len(), self.taps);
+        if k_start >= k_end {
+            return 0.0 as PrcFmt;
+        }
+        convolve_direct(branch, buf, n_p, k_start, k_end)
+    }
+
+    #[inline]
+    fn eval_branch_scalar(&self, buf: &[PrcFmt], branch_idx: usize, n_p: isize) -> PrcFmt {
+        let branch = &self.branches[branch_idx * self.taps..(branch_idx + 1) * self.taps];
+        let (k_start, k_end) = valid_tap_range(n_p, buf.len(), self.taps);
+        if k_start >= k_end {
+            return 0.0 as PrcFmt;
+        }
+        convolve_direct_scalar(branch, buf, n_p, k_start, k_end)
+    }
+
+    #[inline]
+    fn eval_cubic(&self, buf: &[PrcFmt], center: isize, bf: f64) -> PrcFmt {
         // Branch is `frac * oversampling` within [0, oversampling). For cubic
         // interpolation we evaluate 4 adjacent branches and Lagrange-interpolate.
-        let bf = frac * self.oversampling as f64;
         let b_int = bf.floor() as isize;
         let b_frac = bf - b_int as f64; // in [0, 1)
 
         let mut taps_out = [0.0 as PrcFmt; 4];
         for j in 0..4_isize {
-            let b_raw = b_int + j - 1; // four branches: b-1, b, b+1, b+2
-            // When the raw branch index crosses the modular boundary, the
-            // equivalent (branch, n_p) shifts the input sample index by +/-1.
+            // Four branches: b-1, b, b+1, b+2. When the raw branch index
+            // crosses the modular boundary, the equivalent (branch, n_p)
+            // shifts the input sample index by +/-1.
+            let b_raw = b_int + j - 1;
             let (branch_idx, sample_shift) = if b_raw < 0 {
                 ((b_raw + self.oversampling as isize) as usize, -1_isize)
             } else if b_raw >= self.oversampling as isize {
@@ -189,22 +240,11 @@ impl PolyphaseFir {
             } else {
                 (b_raw as usize, 0_isize)
             };
-            let branch = &self.branches[branch_idx * self.taps..(branch_idx + 1) * self.taps];
             // Polyphase convolution at integer upsampled position p_up:
             //   y_up[p_up] = sum_k h_b[k] * x[n_p - k]
             // where b = p_up mod L and n_p = p_up div L.
             let n_p = center + sample_shift;
-            let mut acc: f64 = 0.0;
-            for k in 0..self.taps {
-                let idx = n_p - k as isize;
-                let s = if idx >= 0 && (idx as usize) < buf.len() {
-                    buf[idx as usize] as f64
-                } else {
-                    0.0
-                };
-                acc += branch[k] as f64 * s;
-            }
-            taps_out[j as usize] = acc as PrcFmt;
+            taps_out[j as usize] = self.eval_branch_scalar(buf, branch_idx, n_p);
         }
 
         // Cubic Lagrange at offset b_frac over indices {-1, 0, 1, 2}. The four
@@ -226,6 +266,123 @@ impl PolyphaseFir {
     }
 }
 
+#[inline]
+fn direct_branch(bf: f64, oversampling: usize) -> Option<DirectBranch> {
+    let nearest = bf.round();
+    if (bf - nearest).abs() > DIRECT_PHASE_EPSILON {
+        return None;
+    }
+
+    let oversampling = oversampling as isize;
+    let branch = nearest as isize;
+    if branch == oversampling {
+        Some(DirectBranch {
+            branch_idx: 0,
+            sample_shift: 1,
+        })
+    } else if (0..oversampling).contains(&branch) {
+        Some(DirectBranch {
+            branch_idx: branch as usize,
+            sample_shift: 0,
+        })
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn direct_phase_step(input_rate: usize, output_rate: usize, oversampling: usize) -> Option<isize> {
+    let numerator = input_rate as u128 * oversampling as u128;
+    let output_rate = output_rate as u128;
+    if numerator % output_rate != 0 {
+        return None;
+    }
+
+    let step = numerator / output_rate;
+    if step <= isize::MAX as u128 {
+        Some(step as isize)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn snap_to_branch_grid(pos: f64, oversampling: usize) -> f64 {
+    (pos * oversampling as f64).round() / oversampling as f64
+}
+
+#[inline]
+fn valid_tap_range(n_p: isize, buf_len: usize, taps: usize) -> (usize, usize) {
+    if n_p < 0 {
+        return (0, 0);
+    }
+
+    let lower_bound = n_p - buf_len as isize + 1;
+    let k_start = lower_bound.max(0) as usize;
+    let k_end = (n_p as usize + 1).min(taps);
+    (k_start.min(k_end), k_end)
+}
+
+#[inline]
+fn convolve_direct(
+    branch: &[PrcFmt],
+    buf: &[PrcFmt],
+    n_p: isize,
+    k_start: usize,
+    k_end: usize,
+) -> PrcFmt {
+    #[cfg(all(target_arch = "aarch64", not(feature = "32bit")))]
+    {
+        // SAFETY: NEON is mandatory on AArch64 and the tap range was derived
+        // from `buf`/`branch` bounds by `valid_tap_range`.
+        unsafe { neon::convolve_direct_neon(branch, buf, n_p, k_start, k_end) }
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", not(feature = "32bit"))))]
+    {
+        convolve_direct_scalar(branch, buf, n_p, k_start, k_end)
+    }
+}
+
+#[inline]
+fn convolve_direct_scalar(
+    branch: &[PrcFmt],
+    buf: &[PrcFmt],
+    n_p: isize,
+    k_start: usize,
+    k_end: usize,
+) -> PrcFmt {
+    debug_assert!(k_start <= k_end);
+    debug_assert!(k_end <= branch.len());
+    debug_assert!(n_p >= 0);
+
+    let n_p = n_p as usize;
+    let mut k = k_start;
+    let mut acc0 = 0.0_f64;
+    let mut acc1 = 0.0_f64;
+    let mut acc2 = 0.0_f64;
+    let mut acc3 = 0.0_f64;
+
+    unsafe {
+        while k + 3 < k_end {
+            let sample_idx = n_p - k;
+            acc0 += *branch.get_unchecked(k) as f64 * *buf.get_unchecked(sample_idx) as f64;
+            acc1 += *branch.get_unchecked(k + 1) as f64 * *buf.get_unchecked(sample_idx - 1) as f64;
+            acc2 += *branch.get_unchecked(k + 2) as f64 * *buf.get_unchecked(sample_idx - 2) as f64;
+            acc3 += *branch.get_unchecked(k + 3) as f64 * *buf.get_unchecked(sample_idx - 3) as f64;
+            k += 4;
+        }
+
+        let mut acc = acc0 + acc1 + acc2 + acc3;
+        while k < k_end {
+            let sample_idx = n_p - k;
+            acc += *branch.get_unchecked(k) as f64 * *buf.get_unchecked(sample_idx) as f64;
+            k += 1;
+        }
+        acc as PrcFmt
+    }
+}
+
 impl Resampler<PrcFmt> for PolyphaseFir {
     fn process_into_buffer<'a>(
         &mut self,
@@ -243,8 +400,9 @@ impl Resampler<PrcFmt> for PolyphaseFir {
         } else {
             self.channel_mask.iter_mut().for_each(|v| *v = true);
         }
-        let (input_offset, output_offset) =
-            indexing.map(|i| (i.input_offset, i.output_offset)).unwrap_or((0, 0));
+        let (input_offset, output_offset) = indexing
+            .map(|i| (i.input_offset, i.output_offset))
+            .unwrap_or((0, 0));
         let partial_len = indexing.and_then(|i| i.partial_len);
 
         let needed = self.input_needed();
@@ -292,8 +450,8 @@ impl Resampler<PrcFmt> for PolyphaseFir {
         }
         for (ch, active) in self.channel_mask.iter().enumerate() {
             if *active {
-                let dst = &mut self.buffers[ch]
-                    [self.buffer_fill..self.buffer_fill + frames_to_read];
+                let dst =
+                    &mut self.buffers[ch][self.buffer_fill..self.buffer_fill + frames_to_read];
                 buffer_in.copy_from_channel_to_slice(ch, input_offset, dst);
                 // Pad with zeros if partial.
                 if frames_to_read < needed {
@@ -309,12 +467,28 @@ impl Resampler<PrcFmt> for PolyphaseFir {
 
         // Produce output samples.
         let step = 1.0 / self.resample_ratio;
-        for out_idx in 0..self.chunk_size {
-            let pos = self.next_input_pos + out_idx as f64 * step;
-            for (ch, active) in self.channel_mask.iter().enumerate() {
-                if *active {
-                    let y = self.eval(ch, pos);
-                    buffer_out.write_sample(ch, output_offset + out_idx, &y);
+        if let Some(direct_phase_step) = self.direct_phase_step {
+            let start_up = (self.next_input_pos * self.oversampling as f64).round() as isize;
+            let oversampling = self.oversampling as isize;
+            for out_idx in 0..self.chunk_size {
+                let up_pos = start_up + out_idx as isize * direct_phase_step;
+                let center = up_pos.div_euclid(oversampling);
+                let branch_idx = up_pos.rem_euclid(oversampling) as usize;
+                for (ch, active) in self.channel_mask.iter().enumerate() {
+                    if *active {
+                        let y = self.eval_direct(&self.buffers[ch], branch_idx, center);
+                        buffer_out.write_sample(ch, output_offset + out_idx, &y);
+                    }
+                }
+            }
+        } else {
+            for out_idx in 0..self.chunk_size {
+                let pos = self.next_input_pos + out_idx as f64 * step;
+                for (ch, active) in self.channel_mask.iter().enumerate() {
+                    if *active {
+                        let y = self.eval(ch, pos);
+                        buffer_out.write_sample(ch, output_offset + out_idx, &y);
+                    }
                 }
             }
         }
@@ -337,6 +511,9 @@ impl Resampler<PrcFmt> for PolyphaseFir {
             }
             self.buffer_fill -= consumed;
             self.next_input_pos -= consumed as f64;
+        }
+        if self.direct_phase_step.is_some() {
+            self.next_input_pos = snap_to_branch_grid(self.next_input_pos, self.oversampling);
         }
 
         Ok((needed, self.chunk_size))
@@ -378,11 +555,7 @@ impl Resampler<PrcFmt> for PolyphaseFir {
         self.resample_ratio
     }
 
-    fn set_resample_ratio_relative(
-        &mut self,
-        _rel_ratio: f64,
-        _ramp: bool,
-    ) -> ResampleResult<()> {
+    fn set_resample_ratio_relative(&mut self, _rel_ratio: f64, _ramp: bool) -> ResampleResult<()> {
         Err(ResampleError::SyncNotAdjustable)
     }
 
@@ -487,7 +660,11 @@ fn design_kaiser_lp(
     for n in 0..len {
         let k = n as i64 - half;
         let arg = 2.0 * cutoff * k as f64;
-        let sinc = if k == 0 { 1.0 } else { (PI * arg).sin() / (PI * arg) };
+        let sinc = if k == 0 {
+            1.0
+        } else {
+            (PI * arg).sin() / (PI * arg)
+        };
         let win_arg = k as f64 / half as f64;
         let win = bessel_i0(beta * (1.0 - win_arg * win_arg).max(0.0).sqrt()) / i0_beta;
         h[n] = ((2.0 * cutoff) * sinc * win) as PrcFmt;
@@ -512,7 +689,11 @@ fn design_hann_lp(mut len: usize, cutoff: f64, oversampling: usize) -> Vec<PrcFm
     for n in 0..len {
         let k = n as i64 - half;
         let arg = 2.0 * cutoff * k as f64;
-        let sinc = if k == 0 { 1.0 } else { (PI * arg).sin() / (PI * arg) };
+        let sinc = if k == 0 {
+            1.0
+        } else {
+            (PI * arg).sin() / (PI * arg)
+        };
         let win = 0.5 * (1.0 + (PI * k as f64 / half as f64).cos());
         h[n] = ((2.0 * cutoff) * sinc * win) as PrcFmt;
     }
@@ -682,6 +863,157 @@ mod tests {
             im -= *v as f64 * (n as f64 * w).sin();
         }
         20.0 * (re * re + im * im).sqrt().log10()
+    }
+
+    fn sample_tol() -> f64 {
+        #[cfg(not(feature = "32bit"))]
+        {
+            1e-10
+        }
+        #[cfg(feature = "32bit")]
+        {
+            1e-5
+        }
+    }
+
+    fn branch_position(input_rate: usize, output_rate: usize, out_idx: usize) -> f64 {
+        let step = input_rate as f64 / output_rate as f64;
+        let pos = out_idx as f64 * step;
+        let frac = pos - pos.floor();
+        frac * 320.0
+    }
+
+    #[test]
+    fn oversampling_320_classifies_common_ratios_as_direct() {
+        for &(input_rate, output_rate, phase_step) in &[
+            (44_100, 96_000, 147),
+            (48_000, 96_000, 160),
+            (88_200, 96_000, 294),
+        ] {
+            assert_eq!(
+                direct_phase_step(input_rate, output_rate, 320),
+                Some(phase_step)
+            );
+            for out_idx in 0..2048 {
+                let bf = branch_position(input_rate, output_rate, out_idx);
+                assert!(
+                    direct_branch(bf, 320).is_some(),
+                    "{input_rate}->{output_rate} output {out_idx} was not direct: bf={bf}"
+                );
+            }
+        }
+        assert_eq!(direct_phase_step(96_000, 44_100, 320), None);
+    }
+
+    #[test]
+    fn direct_branch_handles_zero_wrap_and_fractional_phase() {
+        let eps = DIRECT_PHASE_EPSILON * 0.5;
+        assert_eq!(
+            direct_branch(eps, 320),
+            Some(DirectBranch {
+                branch_idx: 0,
+                sample_shift: 0
+            })
+        );
+        assert_eq!(
+            direct_branch(320.0 - eps, 320),
+            Some(DirectBranch {
+                branch_idx: 0,
+                sample_shift: 1
+            })
+        );
+        assert!(direct_branch(12.25, 320).is_none());
+    }
+
+    #[test]
+    fn direct_eval_matches_cubic_on_integer_phase() {
+        let mut r = PolyphaseFir::new(
+            44_100,
+            96_000,
+            128,
+            1,
+            config::PolyphaseCharacter::LinearPhase,
+            32,
+            320,
+        )
+        .unwrap();
+        for (idx, sample) in r.buffers[0].iter_mut().enumerate() {
+            let value = ((idx * 17 % 31) as f64 - 15.0) / 31.0;
+            *sample = value as PrcFmt;
+        }
+
+        let pos: f64 = 80.0 + 147.0 / 320.0;
+        let center = pos.floor() as isize;
+        let bf = (pos - pos.floor()) * r.oversampling as f64;
+        assert!(direct_branch(bf, r.oversampling).is_some());
+
+        let fast = r.eval(0, pos);
+        let cubic = r.eval_cubic(&r.buffers[0], center, bf);
+        let diff = (fast as f64 - cubic as f64).abs();
+        assert!(
+            diff <= sample_tol(),
+            "direct/cubic mismatch at integer phase: fast={fast}, cubic={cubic}, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn fractional_phase_uses_cubic_path() {
+        let mut r = PolyphaseFir::new(
+            44_100,
+            96_000,
+            128,
+            1,
+            config::PolyphaseCharacter::LinearPhase,
+            32,
+            320,
+        )
+        .unwrap();
+        for (idx, sample) in r.buffers[0].iter_mut().enumerate() {
+            let value = ((idx * 13 % 29) as f64 - 14.0) / 29.0;
+            *sample = value as PrcFmt;
+        }
+
+        let pos: f64 = 80.12345;
+        let center = pos.floor() as isize;
+        let bf = (pos - pos.floor()) * r.oversampling as f64;
+        assert!(direct_branch(bf, r.oversampling).is_none());
+
+        let eval = r.eval(0, pos);
+        let cubic = r.eval_cubic(&r.buffers[0], center, bf);
+        let diff = (eval as f64 - cubic as f64).abs();
+        assert!(
+            diff <= sample_tol(),
+            "fractional phase should use cubic path: eval={eval}, cubic={cubic}, diff={diff}"
+        );
+    }
+
+    #[cfg(all(target_arch = "aarch64", not(feature = "32bit")))]
+    #[test]
+    fn direct_neon_matches_scalar() {
+        for &taps in &[1_usize, 2, 3, 4, 7, 8, 31, 64, 65] {
+            let branch: Vec<PrcFmt> = (0..taps)
+                .map(|idx| (((idx * 17 % 31) as f64 - 15.0) / 97.0) as PrcFmt)
+                .collect();
+            let buf: Vec<PrcFmt> = (0..96)
+                .map(|idx| (((idx * 13 % 29) as f64 - 14.0) / 53.0) as PrcFmt)
+                .collect();
+
+            for &n_p in &[0_isize, 1, 5, 31, 63, 95, 101] {
+                let (k_start, k_end) = valid_tap_range(n_p, buf.len(), taps);
+                if k_start >= k_end {
+                    continue;
+                }
+                let scalar = convolve_direct_scalar(&branch, &buf, n_p, k_start, k_end);
+                let neon =
+                    unsafe { neon::convolve_direct_neon(&branch, &buf, n_p, k_start, k_end) };
+                let diff = (scalar as f64 - neon as f64).abs();
+                let tol = 1e-14 * taps as f64;
+                assert!(
+                    diff <= tol,
+                    "NEON/scalar mismatch taps={taps}, n_p={n_p}, range={k_start}..{k_end}: scalar={scalar}, neon={neon}, diff={diff}, tol={tol}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -859,12 +1191,7 @@ mod tests {
     #[test]
     fn slow_rolloff_is_short() {
         // Most of the prototype should be zero (short kernel padded out).
-        let proto = design_prototype(
-            config::PolyphaseCharacter::SlowRollOff,
-            4096,
-            0.4 / 2.0,
-            1,
-        );
+        let proto = design_prototype(config::PolyphaseCharacter::SlowRollOff, 4096, 0.4 / 2.0, 1);
         let nonzero = proto.iter().filter(|v| v.abs() > 1e-9 as PrcFmt).count();
         // Should be roughly 64 taps wide, not the full 4096.
         assert!(
