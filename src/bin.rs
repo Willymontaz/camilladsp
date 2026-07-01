@@ -217,18 +217,33 @@ fn run(
                 match msg {
                     Ok(ControllerMessage::CaptureSampleRateChanged(new_rate)) => {
                         debug!("Capture sample rate change command received, new rate: {new_rate}");
+                        // A capture-rate change always tears down the capture
+                        // thread (it has already emitted EndOfStream and exited),
+                        // so a full Devices restart is mandatory regardless of
+                        // what config_diff would report. Perform it directly here
+                        // instead of round-tripping through a self-sent
+                        // ConfigChanged: that round-trip could be picked up by our
+                        // own select!, evaluated to a no-op / non-Devices diff and
+                        // silently consumed, after which the trailing PlaybackDone
+                        // would stop CamillaDSP instead of restarting it.
                         let mut new_conf = active_config.clone();
                         new_conf.devices.capture_samplerate = Some(new_rate);
-                        // Persist the updated config in the shared "previous"
-                        // slot so the outer supervisor loop can recover it if
-                        // PlaybackDone races ahead of ConfigChanged and clears
-                        // active_config before this run() returns.
-                        *shared_configs.previous.lock() = Some(new_conf.clone());
-                        if let Err(e) = tx_ctrl.try_send(
-                            ControllerMessage::ConfigChanged(Box::new(new_conf)),
-                        ) {
-                            error!("Failed to schedule config change for capture rate: {e}");
+                        debug!("Capture rate changed, restart required.");
+                        if tx_command_cap.send(CommandMessage::Exit).is_err() {
+                            debug!("Capture thread has already exited");
                         }
+                        trace!("Wait for playback thread to exit..");
+                        pb_handle.join().unwrap();
+                        trace!("Wait for capture thread to exit..");
+                        cap_handle.join().unwrap();
+                        {
+                            let mut active_cfg_shared = shared_configs.active.lock();
+                            let mut prev_cfg_shared = shared_configs.previous.lock();
+                            *prev_cfg_shared = Some(active_config);
+                            *active_cfg_shared = Some(new_conf);
+                        }
+                        trace!("All threads stopped, returning");
+                        return Ok(ExitState::Restart);
                     },
                     Ok(ControllerMessage::ConfigChanged(new_conf)) => {
                         if !ctrl_ch.is_empty() {
@@ -413,6 +428,47 @@ fn run(
                             return Ok(ExitState::Restart);
                         }
                         StatusMessage::PlaybackDone => {
+                            // A follow_capture_samplerate rate change surfaces
+                            // here as PlaybackDone, because it tears down the
+                            // pipeline via EndOfStream (capture -> processing ->
+                            // playback). The capture thread always sends
+                            // CaptureSampleRateChanged on the control channel
+                            // *before* EndOfStream, and EndOfStream must traverse
+                            // two more threads before it becomes PlaybackDone, so
+                            // by the time we observe PlaybackDone that control
+                            // message is guaranteed to already be queued. Drain it
+                            // and restart at the new rate instead of treating this
+                            // as a genuine end-of-stream that stops CamillaDSP.
+                            let mut pending_rate = None;
+                            let mut requeue = Vec::new();
+                            while let Ok(msg) = rx_ctrl.try_recv() {
+                                match msg {
+                                    ControllerMessage::CaptureSampleRateChanged(r) => {
+                                        pending_rate = Some(r);
+                                    }
+                                    other => requeue.push(other),
+                                }
+                            }
+                            for m in requeue {
+                                let _ = tx_ctrl.try_send(m);
+                            }
+                            if let Some(new_rate) = pending_rate {
+                                info!("Playback finished due to capture rate change, restarting at {new_rate} Hz");
+                                let mut new_conf = active_config.clone();
+                                new_conf.devices.capture_samplerate = Some(new_rate);
+                                trace!("Wait for playback thread to exit..");
+                                pb_handle.join().unwrap();
+                                trace!("Wait for capture thread to exit..");
+                                cap_handle.join().unwrap();
+                                {
+                                    let mut active_cfg_shared = shared_configs.active.lock();
+                                    let mut prev_cfg_shared = shared_configs.previous.lock();
+                                    *prev_cfg_shared = Some(active_config);
+                                    *active_cfg_shared = Some(new_conf);
+                                }
+                                trace!("All threads stopped, returning");
+                                return Ok(ExitState::Restart);
+                            }
                             info!("Playback finished");
                             {
                                 let stat = status_structs.status.upgradable_read();
