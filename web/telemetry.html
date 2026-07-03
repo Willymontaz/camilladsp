@@ -1,0 +1,866 @@
+<!--
+  CamillaDSP real-time processing telemetry GUI
+  ============================================================================
+  Self-contained, dependency-free local page. Open it in a browser pointed at a
+  running CamillaDSP instance:
+
+      web/telemetry.html?host=localhost&port=1234
+
+  It connects to the CamillaDSP websocket and shows, in real time, when the
+  corrective processors engage:
+    - ISP guard      (GetIspAttenuation)   -- resampler intersample-peak limiter
+    - Declipper      (GetDeclippedSamples) -- source-repair clip restoration
+    - Upward expander(GetExpansionGain)    -- dynamics restoration
+  plus a program-level IN vs OUT volume panel fed from GetSignalLevels
+  (capture_* = chain input, playback_* = post-processing output).
+
+  Protocol: the current server speaks JSON over the websocket. A unit command is
+  a bare JSON string ("GetIspAttenuation"); an argument command is a JSON object
+  ({"SetUpdateInterval":100}). Replies are keyed by command name:
+  {"GetIspAttenuation":{"result":"Ok","value":0.8}}. Errors carry a non-"Ok"
+  result, and an unparseable command comes back as {"Invalid":{"error":...}}.
+  (This is NOT the legacy text protocol used by the stale web/camilla.html.)
+-->
+<title>CamillaDSP Telemetry</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c232d;
+    --border: #2a323d;
+    --text: #d7dee6;
+    --text-dim: #8a95a3;
+    --accent: #4aa3ff;
+    --idle: #2ec27e;
+    --active: #ffb020;
+    --alert: #ff5b5b;
+    --clip: #ff5b5b;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--text-dim); font-weight: 600; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1 1 auto; }
+
+  /* --- connection bar --- */
+  .connbar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 14px;
+  }
+  .connbar input {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 6px 9px; font: inherit; width: 130px;
+  }
+  .connbar input.port { width: 74px; }
+  .connbar label { color: var(--text-dim); font-size: 12px; }
+  button {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
+  .light { width: 11px; height: 11px; border-radius: 50%; background: var(--text-dim); box-shadow: 0 0 0 3px rgba(255,255,255,.04); }
+  .light.on { background: var(--idle); box-shadow: 0 0 8px var(--idle); }
+  .light.connecting { background: var(--active); box-shadow: 0 0 8px var(--active); }
+  .light.off { background: var(--alert); }
+  .status-txt { font-size: 12px; color: var(--text-dim); min-width: 130px; }
+  .meta { font-size: 12px; color: var(--text-dim); }
+  .meta b { color: var(--text); font-weight: 600; }
+
+  /* --- clean banner --- */
+  .banner {
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; text-align: center;
+    font-weight: 700; letter-spacing: 2px; font-size: 15px;
+    background: rgba(46,194,126,.12); color: var(--idle); border: 1px solid rgba(46,194,126,.35);
+    transition: opacity .2s;
+  }
+  .banner.dirty { background: rgba(255,176,32,.10); color: var(--active); border-color: rgba(255,176,32,.35); }
+
+  /* --- layout --- */
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+    display: flex; flex-direction: column; gap: 12px; position: relative; transition: opacity .2s;
+  }
+  .card.unavailable { opacity: .5; }
+  .card .head { display: flex; align-items: center; justify-content: space-between; }
+  .card .title { font-size: 14px; font-weight: 600; }
+  .card .sub { font-size: 11px; color: var(--text-dim); }
+  .state {
+    font-size: 11px; font-weight: 700; letter-spacing: 1px; padding: 3px 10px; border-radius: 20px;
+    background: rgba(46,194,126,.15); color: var(--idle); border: 1px solid rgba(46,194,126,.4);
+  }
+  .state.active { background: rgba(255,176,32,.18); color: var(--active); border-color: rgba(255,176,32,.5); box-shadow: 0 0 12px rgba(255,176,32,.3); }
+  .state.na { background: var(--panel-2); color: var(--text-dim); border-color: var(--border); }
+
+  /* --- horizontal db bar meter --- */
+  .meter { position: relative; height: 22px; background: var(--panel-2); border-radius: 5px; overflow: hidden; border: 1px solid var(--border); }
+  .meter .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: linear-gradient(90deg, var(--accent), var(--active)); border-radius: 4px; transition: width .05s linear; }
+  .meter .hold { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .9; }
+  .readout { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+  .readout b { color: var(--text); }
+
+  /* --- declipper counter --- */
+  .counter { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1; transition: color .1s; }
+  .counter.blink { color: var(--alert); }
+  .declip-grid { display: flex; align-items: baseline; gap: 16px; }
+
+  /* --- canvas sparklines --- */
+  canvas { width: 100%; display: block; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--border); }
+
+  /* --- IN/OUT volume panel --- */
+  .vol-wrap { display: flex; gap: 20px; align-items: stretch; flex-wrap: wrap; }
+  .vol-meters { display: flex; gap: 26px; padding-left: 34px; position: relative; }
+  .vscale { position: absolute; left: 0; top: 0; bottom: 18px; width: 30px; }
+  .vscale span { position: absolute; right: 2px; font-family: var(--mono); font-size: 9px; color: var(--text-dim); transform: translateY(-50%); }
+  .vmeter { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .vbar-holder { position: relative; width: 46px; height: 220px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  .vbar-holder .clipzone { position: absolute; left: 0; right: 0; top: 0; background: rgba(255,91,91,.12); border-bottom: 1px dashed rgba(255,91,91,.5); }
+  .vbar { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, var(--idle), var(--active)); }
+  .vhold { position: absolute; left: 0; right: 0; height: 2px; background: #fff; }
+  .vlabel { font-size: 12px; font-weight: 700; letter-spacing: 1px; color: var(--text-dim); }
+  .vnum { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .vdelta { display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+  .vdelta .big { font-family: var(--mono); font-size: 26px; font-weight: 700; }
+  .vtimeline { flex: 1 1 320px; min-width: 260px; display: flex; flex-direction: column; gap: 6px; }
+
+  /* --- event log --- */
+  .log-head { display: flex; justify-content: space-between; align-items: center; }
+  .log { font-family: var(--mono); font-size: 12px; max-height: 220px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .log div { padding: 1px 0; white-space: nowrap; }
+  .log .ts { color: var(--text-dim); }
+  .log .tag-isp { color: var(--accent); }
+  .log .tag-declip { color: var(--alert); }
+  .log .tag-expand { color: var(--active); }
+  .log .tag-conn { color: var(--text-dim); }
+  .log .empty { color: var(--text-dim); }
+  .small { font-size: 11px; color: var(--text-dim); }
+</style>
+
+<div class="row" style="margin-bottom:12px; justify-content:space-between;">
+  <h1>CamillaDSP &middot; Processing Telemetry</h1>
+  <span class="meta" id="ctx"></span>
+</div>
+
+<!-- connection bar -->
+<div class="connbar">
+  <div class="light off" id="light"></div>
+  <span class="status-txt" id="status">disconnected</span>
+  <label>host</label><input id="host" value="localhost">
+  <label>port</label><input id="port" class="port" value="1234">
+  <button class="primary" id="connectBtn">Connect</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
+  <span class="grow"></span>
+  <span class="meta" id="connMeta"></span>
+</div>
+
+<!-- clean / dirty banner -->
+<div class="banner" id="banner">CLEAN &middot; all processors idle</div>
+
+<!-- IN / OUT volume panel -->
+<div class="panel">
+  <h2>Program volume &middot; IN vs OUT</h2>
+  <div class="vol-wrap">
+    <div class="vol-meters">
+      <div class="vscale" id="vscale"></div>
+      <div class="vmeter">
+        <div class="vbar-holder"><div class="clipzone" id="clipIn"></div><div class="vbar" id="barIn"></div><div class="vhold" id="holdIn"></div></div>
+        <div class="vlabel">IN</div>
+        <div class="vnum" id="numIn">--.- dB</div>
+      </div>
+      <div class="vmeter">
+        <div class="vbar-holder"><div class="clipzone" id="clipOut"></div><div class="vbar" id="barOut"></div><div class="vhold" id="holdOut"></div></div>
+        <div class="vlabel">OUT</div>
+        <div class="vnum" id="numOut">--.- dB</div>
+      </div>
+      <div class="vdelta">
+        <div class="small">&Delta; (out &minus; in)</div>
+        <div class="big" id="delta">-- dB</div>
+        <div class="small" id="deltaHint"></div>
+      </div>
+    </div>
+    <div class="vtimeline">
+      <div class="small">IN / OUT RMS &mdash; last <span id="histSpan">60</span>s</div>
+      <canvas id="volSpark" height="120"></canvas>
+      <div class="small"><span style="color:var(--accent)">&#9632; IN</span> &nbsp; <span style="color:var(--active)">&#9632; OUT</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- processor cards -->
+<div class="cards" id="cards"></div>
+
+<!-- event log -->
+<div class="panel">
+  <div class="log-head">
+    <h2 style="margin:0">Event log</h2>
+    <div class="row">
+      <span class="small" id="logCount">0 events</span>
+      <button id="clearLog">Clear</button>
+      <button id="exportLog">Export CSV</button>
+    </div>
+  </div>
+  <div class="log" id="log"><div class="empty">No events yet.</div></div>
+</div>
+
+<script>
+"use strict";
+// ============================================================================
+// Tunable constants (kept in-code per the plan; no build step / config file)
+// ============================================================================
+const CFG = {
+  pollIntervalMs: 80,        // client poll cadence; server refresh set to match
+  serverUpdateMs: 80,        // SetUpdateInterval sent on connect
+  historySeconds: 60,        // rolling sparkline / timeline window
+  activeLatchMs: 1500,       // how long an ACTIVE state stays latched after an event
+  channelReduce: "max",      // "max" | "mean" -- how per-channel arrays collapse
+  volScale: { min: -60, max: 0 },   // dBFS meter range for IN/OUT
+  clipZoneDb: -1,            // headroom/clip zone starts here on the volume meter
+  peakHoldDecayDbPerSec: 12, // peak-hold marker decay rate (all meters)
+  ispScaleMax: 6,            // ISP attenuation bar full-scale (dB)
+  expandScaleMax: 12,        // expander gain bar full-scale (dB)
+  ispThresholdDb: 0.05,      // ISP considered active above this attenuation
+  expandThresholdDb: 0.05,   // expander considered active above this gain
+  probeTimeoutMs: 1500,      // window to decide a command is unavailable
+  logMax: 800,               // bounded event log length
+  reconnect: { baseMs: 500, maxMs: 8000 }, // auto-reconnect backoff
+};
+
+// ---------- URL params & connection bar prefill ----------
+const params = new URLSearchParams(location.search);
+const hostEl = document.getElementById("host");
+const portEl = document.getElementById("port");
+hostEl.value = params.get("host") || "localhost";
+portEl.value = params.get("port") || "1234";
+document.getElementById("histSpan").textContent = CFG.historySeconds;
+
+// ============================================================================
+// Metric state
+// ============================================================================
+function newHistory() { return []; }  // array of {t, v}
+const now = () => performance.now();
+
+// clock offset so we can timestamp log lines with wall-clock time while using
+// performance.now() (monotonic) internally.
+const clockBase = { perf: now(), wall: Date.now() };
+function wallTime(perfTs) { return new Date(clockBase.wall + (perfTs - clockBase.perf)); }
+
+// Per-processor cards. `probe` marks whether the command is available.
+const cards = {
+  isp: {
+    key: "isp", title: "ISP Guard", sub: "resampler intersample-peak limiter",
+    cmd: "GetIspAttenuation", unit: "dB", scaleMax: CFG.ispScaleMax,
+    threshold: CFG.ispThresholdDb, kind: "bar",
+    current: 0, peakHold: 0, lastActiveTs: -1e9, history: newHistory(),
+    probe: { needed: false, ok: true },  // exists in current build
+  },
+  declip: {
+    key: "declip", title: "Declipper", sub: "clip restoration (samples repaired)",
+    cmd: "GetDeclippedSamples", kind: "counter",
+    count: 0, prevCount: null, rate: 0, lastCountTs: null,
+    lastActiveTs: -1e9, lastBlinkTs: -1e9, history: newHistory(),
+    probe: { needed: true, ok: null, firstReplyTs: null },
+  },
+  expand: {
+    key: "expand", title: "Upward Expander", sub: "dynamics restoration",
+    cmd: "GetExpansionGain", unit: "dB", scaleMax: CFG.expandScaleMax,
+    threshold: CFG.expandThresholdDb, kind: "bar",
+    current: 0, peakHold: 0, lastActiveTs: -1e9, history: newHistory(),
+    probe: { needed: true, ok: null, firstReplyTs: null },
+  },
+};
+
+// IN / OUT volume state (fed from GetSignalLevels)
+const vol = {
+  in:  { rms: -100, peak: -100, peakHold: CFG.volScale.min, history: newHistory() },
+  out: { rms: -100, peak: -100, peakHold: CFG.volScale.min, history: newHistory() },
+};
+
+const eventLog = [];  // {tsWall, tag, text}
+
+// ============================================================================
+// Websocket + protocol layer
+// ============================================================================
+let socket = null;
+let connected = false;
+let wantConnected = false;      // user intent (drives auto-reconnect)
+let reconnectDelay = CFG.reconnect.baseMs;
+let reconnectTimer = null;
+let pollTimer = null;
+let probeDeadline = 0;
+
+function reduceChannels(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return CFG.volScale.min;
+  if (CFG.channelReduce === "mean") {
+    // mean in the linear domain would be more correct, but these values are
+    // already dB summaries per channel; a simple mean is fine for a monitor.
+    return arr.reduce((a, b) => a + b, 0) / arr.length;
+  }
+  return Math.max(...arr);
+}
+
+function setStatus(text, cls) {
+  document.getElementById("status").textContent = text;
+  const light = document.getElementById("light");
+  light.className = "light " + (cls || "");
+}
+
+function connect() {
+  const host = hostEl.value.trim() || "localhost";
+  const port = portEl.value.trim() || "1234";
+  wantConnected = true;
+  clearTimeout(reconnectTimer);
+  try {
+    setStatus("connecting to " + host + ":" + port + " ...", "connecting");
+    socket = new WebSocket("ws://" + host + ":" + port);
+  } catch (err) {
+    setStatus("bad address: " + err.message, "off");
+    scheduleReconnect();
+    return;
+  }
+  socket.onopen = onOpen;
+  socket.onclose = onClose;
+  socket.onerror = () => { /* onclose will follow */ };
+  socket.onmessage = onMessage;
+}
+
+function disconnect() {
+  wantConnected = false;
+  clearTimeout(reconnectTimer);
+  stopPolling();
+  if (socket) { try { socket.close(); } catch (e) {} }
+}
+
+function scheduleReconnect() {
+  if (!wantConnected) return;
+  setStatus("disconnected — retrying in " + Math.round(reconnectDelay / 100) / 10 + "s", "off");
+  reconnectTimer = setTimeout(() => {
+    reconnectDelay = Math.min(reconnectDelay * 2, CFG.reconnect.maxMs);
+    connect();
+  }, reconnectDelay);
+}
+
+function onOpen() {
+  connected = true;
+  reconnectDelay = CFG.reconnect.baseMs;
+  setStatus("connected", "on");
+  document.getElementById("connectBtn").disabled = true;
+  document.getElementById("disconnectBtn").disabled = false;
+  logEvent("conn", "connected to " + hostEl.value + ":" + portEl.value);
+
+  // Reset probe state so degradation is re-evaluated on each fresh connection.
+  probeDeadline = now() + CFG.probeTimeoutMs;
+  for (const c of Object.values(cards)) {
+    if (c.probe.needed) { c.probe.ok = null; c.probe.firstReplyTs = null; }
+  }
+
+  // Align the server's metering refresh to our poll cadence, then start polling.
+  send({ SetUpdateInterval: CFG.serverUpdateMs });
+  // one-off context queries
+  send("GetVersion");
+  send("GetConfigTitle");
+  startPolling();
+}
+
+function onClose() {
+  connected = false;
+  stopPolling();
+  document.getElementById("connectBtn").disabled = false;
+  document.getElementById("disconnectBtn").disabled = true;
+  if (wantConnected) {
+    logEvent("conn", "connection lost");
+    scheduleReconnect();
+  } else {
+    setStatus("disconnected", "off");
+    logEvent("conn", "disconnected");
+  }
+}
+
+function send(cmd) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  // unit command = bare JSON string; argument command = JSON object
+  socket.send(JSON.stringify(cmd));
+}
+
+function startPolling() {
+  stopPolling();
+  poll();
+  pollTimer = setInterval(poll, CFG.pollIntervalMs);
+}
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+function poll() {
+  send("GetSignalLevels");
+  send("GetIspAttenuation");
+  // Only poll the maybe-unavailable commands while probing or once confirmed OK.
+  if (cards.expand.probe.ok !== false) send("GetExpansionGain");
+  if (cards.declip.probe.ok !== false) send("GetDeclippedSamples");
+  send("GetProcessingLoad");
+  send("GetState");
+}
+
+// ---- reply dispatch (replies are keyed by command name) ----
+const dispatch = {
+  GetSignalLevels(v) {
+    const t = now();
+    vol.in.rms   = reduceChannels(v.capture_rms);
+    vol.in.peak  = reduceChannels(v.capture_peak);
+    vol.out.rms  = reduceChannels(v.playback_rms);
+    vol.out.peak = reduceChannels(v.playback_peak);
+    // feed peak into peak-hold (rise instantly, decay in render loop)
+    if (vol.in.peak  > vol.in.peakHold)  vol.in.peakHold  = vol.in.peak;
+    if (vol.out.peak > vol.out.peakHold) vol.out.peakHold = vol.out.peak;
+    pushHistory(vol.in.history,  t, vol.in.rms);
+    pushHistory(vol.out.history, t, vol.out.rms);
+  },
+  GetIspAttenuation(v) { updateBarCard(cards.isp, v); },
+  GetExpansionGain(v)  { markProbe(cards.expand); updateBarCard(cards.expand, v); },
+  GetDeclippedSamples(v) { markProbe(cards.declip); updateDeclip(v); },
+  GetProcessingLoad(v) { ctx.load = v; },
+  GetState(v)          { ctx.state = v; },
+  GetVersion(v)        { ctx.version = v; },
+  GetConfigTitle(v)    { ctx.title = v; },
+  SetUpdateInterval() {},
+  ResetDeclippedSamples() {},
+};
+
+const ctx = { version: null, title: null, load: null, state: null };
+
+function onMessage(ev) {
+  let reply;
+  try { reply = JSON.parse(ev.data); } catch (e) { return; }
+  const entry = Object.entries(reply)[0];
+  if (!entry) return;
+  const [key, body] = entry;
+  if (key === "Invalid") return;  // unparseable command; can't attribute -> ignore
+  if (!body || body.result !== "Ok") {
+    // command exists but errored (e.g. not supported in this build)
+    const card = Object.values(cards).find(c => c.cmd === key);
+    if (card && card.probe.needed && card.probe.ok !== true) setUnavailable(card);
+    return;
+  }
+  const fn = dispatch[key];
+  if (fn) fn(body.value);
+}
+
+// A keyed Ok reply for a probed command means the command is available.
+function markProbe(card) {
+  if (card.probe.needed && card.probe.ok === null) {
+    card.probe.ok = true;
+    card.el.root.classList.remove("unavailable");
+    card.el.state.classList.remove("na");
+    logEvent(card.key, card.title + " available");
+  }
+}
+
+function setUnavailable(card) {
+  card.probe.ok = false;
+  card.el.root.classList.add("unavailable");
+  card.el.state.textContent = "N/A";
+  card.el.state.className = "state na";
+  card.el.sub.textContent = "not available in this build";
+}
+
+// After the probe window, any needed command that never replied Ok is unavailable.
+function checkProbeTimeout() {
+  if (!connected || probeDeadline === 0 || now() < probeDeadline) return;
+  for (const c of Object.values(cards)) {
+    if (c.probe.needed && c.probe.ok === null) setUnavailable(c);
+  }
+  probeDeadline = 0;
+}
+
+// ============================================================================
+// Metric updates
+// ============================================================================
+function updateBarCard(card, value) {
+  if (card.probe.ok === false) return;
+  const t = now();
+  card.current = value;
+  if (value > card.peakHold) card.peakHold = value;
+  pushHistory(card.history, t, value);
+  if (value > card.threshold) {
+    if (t - card.lastActiveTs > CFG.activeLatchMs) {
+      logEvent(card.key, card.title + " " + fmtDb(value));
+    }
+    card.lastActiveTs = t;
+  }
+}
+
+function updateDeclip(count) {
+  if (cards.declip.probe.ok === false) return;
+  const c = cards.declip;
+  const t = now();
+  if (c.prevCount !== null && c.lastCountTs !== null) {
+    const dt = (t - c.lastCountTs) / 1000;
+    const dCount = count - c.prevCount;
+    if (dt > 0) c.rate = dCount / dt;
+    if (dCount > 0) {
+      c.lastActiveTs = t;
+      c.lastBlinkTs = t;
+      logEvent("declip", "Declip +" + dCount + " sample" + (dCount === 1 ? "" : "s") +
+               " (total " + count + ")");
+    } else if (t - c.lastCountTs > 300) {
+      // decay the displayed rate toward zero when no new clips arrive
+      c.rate *= 0.5;
+    }
+  }
+  c.prevCount = count;
+  c.count = count;
+  c.lastCountTs = t;
+  pushHistory(c.history, t, count);
+}
+
+function pushHistory(arr, t, v) {
+  arr.push({ t, v });
+  const cutoff = t - CFG.historySeconds * 1000;
+  while (arr.length && arr[0].t < cutoff) arr.shift();
+}
+
+// ============================================================================
+// Event log
+// ============================================================================
+function logEvent(tag, text) {
+  const tsWall = wallTime(now());
+  eventLog.unshift({ tsWall, tag, text });
+  if (eventLog.length > CFG.logMax) eventLog.length = CFG.logMax;
+  renderLog();
+}
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+function fmtClock(d) { return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds()); }
+
+function renderLog() {
+  const el = document.getElementById("log");
+  document.getElementById("logCount").textContent = eventLog.length + " event" + (eventLog.length === 1 ? "" : "s");
+  if (eventLog.length === 0) { el.innerHTML = '<div class="empty">No events yet.</div>'; return; }
+  const frag = document.createDocumentFragment();
+  for (const e of eventLog) {
+    const d = document.createElement("div");
+    d.innerHTML = '<span class="ts">' + fmtClock(e.tsWall) + '</span>  ' +
+                  '<span class="tag-' + e.tag + '">' + escapeHtml(e.text) + '</span>';
+    frag.appendChild(d);
+  }
+  el.innerHTML = "";
+  el.appendChild(frag);
+}
+
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+document.getElementById("clearLog").onclick = () => { eventLog.length = 0; renderLog(); };
+document.getElementById("exportLog").onclick = () => {
+  const rows = [["timestamp", "tag", "event"]];
+  for (const e of eventLog) rows.push([e.tsWall.toISOString(), e.tag, e.text]);
+  const csv = rows.map(r => r.map(f => '"' + String(f).replace(/"/g, '""') + '"').join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "camilladsp-telemetry-" + Date.now() + ".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+// ============================================================================
+// Formatting helpers
+// ============================================================================
+function fmtDb(v) { return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + " dB"; }
+function fmtDbFs(v) {
+  if (!isFinite(v) || v <= CFG.volScale.min) return "−∞ dB";
+  return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + " dB";
+}
+
+// ============================================================================
+// Build processor cards in the DOM
+// ============================================================================
+function buildCards() {
+  const container = document.getElementById("cards");
+  for (const card of Object.values(cards)) {
+    const root = document.createElement("div");
+    root.className = "card";
+    root.innerHTML = `
+      <div class="head">
+        <div>
+          <div class="title">${card.title}</div>
+          <div class="sub">${card.sub}</div>
+        </div>
+        <div class="state">IDLE</div>
+      </div>
+      <div class="body"></div>
+      <canvas height="60"></canvas>
+    `;
+    const body = root.querySelector(".body");
+    card.el = {
+      root,
+      state: root.querySelector(".state"),
+      sub: root.querySelector(".sub"),
+      canvas: root.querySelector("canvas"),
+    };
+
+    if (card.kind === "bar") {
+      body.innerHTML = `
+        <div class="meter"><div class="fill"></div><div class="hold"></div></div>
+        <div class="readout"><span>0 &rarr; ${card.scaleMax} ${card.unit}</span>
+          <span><b class="cur">0.0</b> ${card.unit} &middot; pk <b class="pk">0.0</b></span></div>`;
+      card.el.fill = body.querySelector(".fill");
+      card.el.hold = body.querySelector(".hold");
+      card.el.cur = body.querySelector(".cur");
+      card.el.pk = body.querySelector(".pk");
+    } else if (card.kind === "counter") {
+      body.innerHTML = `
+        <div class="declip-grid">
+          <div><div class="counter">0</div><div class="small">samples repaired</div></div>
+          <div><div class="vnum"><b class="rate">0.0</b> /s</div><div class="small">clip rate</div></div>
+          <div style="margin-left:auto"><button class="reset">Reset</button></div>
+        </div>`;
+      card.el.counter = body.querySelector(".counter");
+      card.el.rate = body.querySelector(".rate");
+      body.querySelector(".reset").onclick = () => {
+        send("ResetDeclippedSamples");
+        card.count = 0; card.prevCount = 0; card.rate = 0;
+        logEvent("declip", "counter reset");
+      };
+    }
+    container.appendChild(root);
+  }
+}
+
+// vertical dBFS scale ticks for the IN/OUT meters
+function buildVolScale() {
+  const el = document.getElementById("vscale");
+  const { min, max } = CFG.volScale;
+  const step = 12;
+  for (let db = max; db >= min; db -= step) {
+    const s = document.createElement("span");
+    s.textContent = db;
+    s.style.top = dbToPct(db) + "%";
+    el.appendChild(s);
+  }
+  // clip zone shading on both meters
+  const zoneH = ((max - CFG.clipZoneDb) / (max - min)) * 100;
+  document.getElementById("clipIn").style.height = zoneH + "%";
+  document.getElementById("clipOut").style.height = zoneH + "%";
+}
+function dbToPct(db) {  // 0% = top(max dB), 100% = bottom(min dB)
+  const { min, max } = CFG.volScale;
+  return (1 - (db - min) / (max - min)) * 100;
+}
+function dbToHeightPct(db) {  // fraction of bar filled from the bottom
+  const { min, max } = CFG.volScale;
+  return Math.max(0, Math.min(1, (db - min) / (max - min))) * 100;
+}
+
+// ============================================================================
+// Render loop (rAF) -- decays peak-holds, draws meters & sparklines
+// ============================================================================
+let lastFrame = now();
+function render() {
+  const t = now();
+  const dt = (t - lastFrame) / 1000;
+  lastFrame = t;
+  const decay = CFG.peakHoldDecayDbPerSec * dt;
+
+  checkProbeTimeout();
+
+  // ---- IN/OUT volume meters ----
+  renderVolMeter("In", vol.in, decay);
+  renderVolMeter("Out", vol.out, decay);
+  const delta = vol.out.rms - vol.in.rms;
+  const deltaEl = document.getElementById("delta");
+  if (isFinite(delta) && vol.in.rms > CFG.volScale.min && vol.out.rms > CFG.volScale.min) {
+    deltaEl.textContent = fmtDb(delta);
+    deltaEl.style.color = delta > 0.3 ? "var(--idle)" : delta < -0.3 ? "var(--accent)" : "var(--text)";
+    document.getElementById("deltaHint").textContent =
+      delta > 0.3 ? "chain adds level" : delta < -0.3 ? "chain reduces level" : "unity";
+  } else {
+    deltaEl.textContent = "-- dB"; deltaEl.style.color = "var(--text)";
+    document.getElementById("deltaHint").textContent = "";
+  }
+  drawVolSpark();
+
+  // ---- processor cards ----
+  let allIdle = true;
+  for (const card of Object.values(cards)) {
+    if (card.probe.ok === false) continue;
+    const active = (t - card.lastActiveTs) < CFG.activeLatchMs;
+    if (active) allIdle = false;
+    card.el.state.textContent = active ? "ACTIVE" : "IDLE";
+    card.el.state.className = "state" + (active ? " active" : "");
+
+    if (card.kind === "bar") {
+      // decay peak-hold marker
+      card.peakHold = Math.max(card.current, card.peakHold - decay);
+      const curPct = Math.max(0, Math.min(1, card.current / card.scaleMax)) * 100;
+      const pkPct = Math.max(0, Math.min(1, card.peakHold / card.scaleMax)) * 100;
+      card.el.fill.style.width = curPct + "%";
+      card.el.hold.style.left = pkPct + "%";
+      card.el.cur.textContent = card.current.toFixed(1);
+      card.el.pk.textContent = card.peakHold.toFixed(1);
+      drawSpark(card, card.scaleMax);
+    } else if (card.kind === "counter") {
+      card.el.counter.textContent = card.count;
+      const blink = (t - card.lastBlinkTs) < 150;
+      card.el.counter.classList.toggle("blink", blink);
+      // decay rate display when idle
+      if (card.lastCountTs && (t - card.lastCountTs) > 500) card.rate *= (1 - Math.min(1, dt * 2));
+      card.el.rate.textContent = card.rate.toFixed(1);
+      drawSparkCounter(card);
+    }
+  }
+
+  // ---- CLEAN banner ----
+  const anyAvailable = Object.values(cards).some(c => c.probe.ok !== false);
+  const banner = document.getElementById("banner");
+  if (!connected) {
+    banner.textContent = "— not connected —";
+    banner.className = "banner"; banner.style.opacity = ".5";
+  } else if (allIdle && anyAvailable) {
+    banner.textContent = "CLEAN · all processors idle";
+    banner.className = "banner"; banner.style.opacity = "1";
+  } else {
+    banner.textContent = "PROCESSING · corrective stage engaged";
+    banner.className = "banner dirty"; banner.style.opacity = "1";
+  }
+
+  // ---- context line ----
+  const parts = [];
+  if (ctx.title) parts.push("<b>" + escapeHtml(ctx.title) + "</b>");
+  if (ctx.state) parts.push(escapeHtml(String(ctx.state)));
+  if (ctx.load != null) parts.push("load " + (ctx.load * 100).toFixed(0) + "%");
+  if (ctx.version) parts.push("v" + escapeHtml(ctx.version));
+  document.getElementById("ctx").innerHTML = parts.join(" &middot; ");
+
+  requestAnimationFrame(render);
+}
+
+function renderVolMeter(suffix, m, decay) {
+  m.peakHold = Math.max(m.rms, m.peakHold - decay);
+  document.getElementById("bar" + suffix).style.height = dbToHeightPct(m.rms) + "%";
+  document.getElementById("hold" + suffix).style.bottom = dbToHeightPct(m.peakHold) + "%";
+  // colour the bar red once inside the clip zone
+  const bar = document.getElementById("bar" + suffix);
+  bar.style.background = m.rms > CFG.clipZoneDb
+    ? "linear-gradient(0deg, var(--active), var(--clip))"
+    : "linear-gradient(0deg, var(--idle), var(--active))";
+  document.getElementById("num" + suffix).textContent = fmtDbFs(m.rms);
+}
+
+// ---------- canvas drawing ----------
+function fitCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr; canvas.height = h * dpr;
+  }
+  const ctx2 = canvas.getContext("2d");
+  ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx: ctx2, w, h };
+}
+
+function timeX(t, tNow, w) {
+  const span = CFG.historySeconds * 1000;
+  return w * (1 - (tNow - t) / span);
+}
+
+function drawSpark(card, scaleMax) {
+  const { ctx: c, w, h } = fitCanvas(card.el.canvas);
+  const tNow = now();
+  c.clearRect(0, 0, w, h);
+  const hist = card.history;
+  if (hist.length < 2) return;
+  // threshold guide line
+  c.strokeStyle = "rgba(255,255,255,.08)"; c.lineWidth = 1;
+  const thY = h - (card.threshold / scaleMax) * h;
+  c.beginPath(); c.moveTo(0, thY); c.lineTo(w, thY); c.stroke();
+  c.beginPath();
+  c.strokeStyle = card.key === "isp" ? "#4aa3ff" : "#ffb020";
+  c.lineWidth = 1.5;
+  for (let i = 0; i < hist.length; i++) {
+    const x = timeX(hist[i].t, tNow, w);
+    const y = h - Math.max(0, Math.min(1, hist[i].v / scaleMax)) * h;
+    i === 0 ? c.moveTo(x, y) : c.lineTo(x, y);
+  }
+  c.stroke();
+}
+
+function drawSparkCounter(card) {
+  const { ctx: c, w, h } = fitCanvas(card.el.canvas);
+  const tNow = now();
+  c.clearRect(0, 0, w, h);
+  const hist = card.history;
+  if (hist.length < 2) return;
+  // draw per-interval increments as bars so bursts are visible
+  let maxInc = 1;
+  const incs = [];
+  for (let i = 1; i < hist.length; i++) {
+    const inc = Math.max(0, hist[i].v - hist[i - 1].v);
+    incs.push({ t: hist[i].t, inc });
+    if (inc > maxInc) maxInc = inc;
+  }
+  c.fillStyle = "#ff5b5b";
+  for (const p of incs) {
+    if (p.inc <= 0) continue;
+    const x = timeX(p.t, tNow, w);
+    const bh = (p.inc / maxInc) * (h - 4);
+    c.fillRect(x - 1, h - bh, 2, bh);
+  }
+}
+
+function drawVolSpark() {
+  const canvas = document.getElementById("volSpark");
+  const { ctx: c, w, h } = fitCanvas(canvas);
+  const tNow = now();
+  c.clearRect(0, 0, w, h);
+  const { min, max } = CFG.volScale;
+  const yOf = v => (1 - (Math.max(min, Math.min(max, v)) - min) / (max - min)) * h;
+  // grid lines every 12 dB
+  c.strokeStyle = "rgba(255,255,255,.06)"; c.lineWidth = 1;
+  for (let db = max; db >= min; db -= 12) {
+    const y = yOf(db);
+    c.beginPath(); c.moveTo(0, y); c.lineTo(w, y); c.stroke();
+  }
+  const drawTrace = (hist, color) => {
+    if (hist.length < 2) return;
+    c.beginPath(); c.strokeStyle = color; c.lineWidth = 1.5;
+    let started = false;
+    for (const p of hist) {
+      if (p.v <= min) { started = false; continue; }  // gap on silence
+      const x = timeX(p.t, tNow, w);
+      const y = yOf(p.v);
+      started ? c.lineTo(x, y) : c.moveTo(x, y);
+      started = true;
+    }
+    c.stroke();
+  };
+  drawTrace(vol.in.history, "#4aa3ff");
+  drawTrace(vol.out.history, "#ffb020");
+}
+
+// ============================================================================
+// Boot
+// ============================================================================
+document.getElementById("connectBtn").onclick = connect;
+document.getElementById("disconnectBtn").onclick = disconnect;
+[hostEl, portEl].forEach(el => el.addEventListener("keydown", e => { if (e.key === "Enter") connect(); }));
+
+buildCards();
+buildVolScale();
+renderLog();
+requestAnimationFrame(render);
+
+// Auto-connect on load using the prefilled/URL values.
+connect();
+</script>
