@@ -1587,6 +1587,11 @@ pub enum Processor {
         description: Option<String>,
         parameters: DeclipperParameters,
     },
+    Expander {
+        #[serde(default)]
+        description: Option<String>,
+        parameters: ExpanderParameters,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1624,6 +1629,91 @@ impl CompressorParameters {
 
     pub fn soft_clip(&self) -> bool {
         self.soft_clip.unwrap_or_default()
+    }
+}
+
+/// Direction of the expansion applied by the [Expander](Processor::Expander).
+#[derive(Clone, Debug, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ExpanderMode {
+    /// Boost signal above the threshold (re-open crushed loud passages).
+    Upward,
+    /// Attenuate signal below the threshold (pull down the quiet floor).
+    Downward,
+    /// Both: boost above and attenuate below the threshold.
+    Both,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExpanderParameters {
+    pub channels: usize,
+    #[serde(default)]
+    pub monitor_channels: Option<Vec<usize>>,
+    #[serde(default)]
+    pub process_channels: Option<Vec<usize>>,
+    pub attack: PrcFmt,
+    pub release: PrcFmt,
+    pub threshold: PrcFmt,
+    pub ratio: PrcFmt,
+    #[serde(default)]
+    pub max_gain_db: Option<PrcFmt>,
+    #[serde(default)]
+    pub mode: Option<ExpanderMode>,
+    #[serde(default)]
+    pub makeup_gain: Option<PrcFmt>,
+    #[serde(default)]
+    pub soft_clip: Option<bool>,
+    #[serde(default)]
+    pub clip_limit: Option<PrcFmt>,
+    #[serde(default)]
+    pub crest_gate: Option<bool>,
+    #[serde(default)]
+    pub crest_floor_db: Option<PrcFmt>,
+    #[serde(default)]
+    pub crest_ceiling_db: Option<PrcFmt>,
+    #[serde(default)]
+    pub knee_db: Option<PrcFmt>,
+}
+
+impl ExpanderParameters {
+    pub fn monitor_channels(&self) -> Vec<usize> {
+        self.monitor_channels.clone().unwrap_or_default()
+    }
+
+    pub fn process_channels(&self) -> Vec<usize> {
+        self.process_channels.clone().unwrap_or_default()
+    }
+
+    pub fn max_gain_db(&self) -> PrcFmt {
+        self.max_gain_db.unwrap_or(6.0)
+    }
+
+    pub fn mode(&self) -> ExpanderMode {
+        self.mode.unwrap_or(ExpanderMode::Upward)
+    }
+
+    pub fn makeup_gain(&self) -> PrcFmt {
+        self.makeup_gain.unwrap_or_default()
+    }
+
+    pub fn soft_clip(&self) -> bool {
+        self.soft_clip.unwrap_or_default()
+    }
+
+    pub fn crest_gate(&self) -> bool {
+        self.crest_gate.unwrap_or(true)
+    }
+
+    pub fn crest_floor_db(&self) -> PrcFmt {
+        self.crest_floor_db.unwrap_or(9.0)
+    }
+
+    pub fn crest_ceiling_db(&self) -> PrcFmt {
+        self.crest_ceiling_db.unwrap_or(15.0)
+    }
+
+    pub fn knee_db(&self) -> PrcFmt {
+        self.knee_db.unwrap_or(6.0)
     }
 }
 

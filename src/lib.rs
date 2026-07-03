@@ -263,6 +263,10 @@ pub struct ProcessingParameters {
     // Cumulative number of samples repaired by the Declipper processor.
     // Reset to zero via `set_declipped_samples(0)` to measure a fresh interval.
     declipped_samples: AtomicUsize,
+    // Current expansion gain applied by the Expander processor, in dB (0.0 == idle,
+    // positive == upward boost, negative == downward attenuation). Surfaced to the
+    // websocket so the crest gate's behaviour can be observed in real time.
+    expansion_gain: AtomicU32,
 }
 
 impl ProcessingParameters {
@@ -298,6 +302,7 @@ impl ProcessingParameters {
             resampler_load: AtomicU32::new(0.0f32.to_bits()),
             isp_attenuation: AtomicU32::new(0.0f32.to_bits()),
             declipped_samples: AtomicUsize::new(0),
+            expansion_gain: AtomicU32::new(0.0f32.to_bits()),
         }
     }
 
@@ -391,6 +396,17 @@ impl ProcessingParameters {
     /// Set the declipped-samples counter, e.g. to zero to start a fresh interval.
     pub fn set_declipped_samples(&self, count: usize) {
         self.declipped_samples.store(count, Ordering::Relaxed);
+    }
+
+    /// Set the current expansion gain applied by the expander, in dB (0.0 means
+    /// idle, positive is an upward boost, negative a downward attenuation).
+    pub fn set_expansion_gain(&self, gain_db: f32) {
+        self.expansion_gain.store(gain_db.to_bits(), Ordering::Relaxed)
+    }
+
+    /// The current expansion gain applied by the expander, in dB.
+    pub fn expansion_gain(&self) -> f32 {
+        f32::from_bits(self.expansion_gain.load(Ordering::Relaxed))
     }
 }
 

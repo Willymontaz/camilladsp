@@ -19,6 +19,7 @@ use crate::filters;
 use crate::mixer;
 use crate::processors::compressor;
 use crate::processors::declipper;
+use crate::processors::expander;
 use crate::processors::noisegate;
 use crate::processors::race;
 use crate::utils::wavtools::find_data_in_wav_stream;
@@ -496,7 +497,8 @@ pub fn config_diff(currentconf: &Configuration, newconf: &Configuration) -> Conf
                     (Processor::Compressor { .. }, Processor::Compressor { .. })
                     | (Processor::NoiseGate { .. }, Processor::NoiseGate { .. })
                     | (Processor::RACE { .. }, Processor::RACE { .. })
-                    | (Processor::Declipper { .. }, Processor::Declipper { .. }) => {}
+                    | (Processor::Declipper { .. }, Processor::Declipper { .. })
+                    | (Processor::Expander { .. }, Processor::Expander { .. }) => {}
                     _ => {
                         return ConfigChange::Pipeline;
                     }
@@ -820,6 +822,26 @@ pub fn validate_config(conf: &mut Configuration, filename: Option<&str>) -> Res<
                                             Err(err) => {
                                                 let msg = format!(
                                                     "Invalid declipper '{}'. Reason: {}",
+                                                    step.name, err
+                                                );
+                                                return Err(ConfigError::new(&msg).into());
+                                            }
+                                        }
+                                    }
+                                    Processor::Expander { parameters, .. } => {
+                                        let channels = parameters.channels;
+                                        if channels != num_channels {
+                                            let msg = format!(
+                                                "Expander '{}' has wrong number of channels. Expected {}, found {}.",
+                                                step.name, num_channels, channels
+                                            );
+                                            return Err(ConfigError::new(&msg).into());
+                                        }
+                                        match expander::validate_expander(parameters) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                let msg = format!(
+                                                    "Invalid expander '{}'. Reason: {}",
                                                     step.name, err
                                                 );
                                                 return Err(ConfigError::new(&msg).into());

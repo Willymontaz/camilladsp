@@ -279,6 +279,16 @@ impl Pipeline {
                                 );
                                 Box::new(declipper) as Box<dyn Processor>
                             }
+                            config::Processor::Expander { parameters, .. } => {
+                                let expander = processors::expander::Expander::from_config(
+                                    &step.name,
+                                    parameters,
+                                    conf.devices.samplerate,
+                                    conf.devices.chunksize,
+                                    processing_params.clone(),
+                                );
+                                Box::new(expander) as Box<dyn Processor>
+                            }
                         };
                         steps.push(PipelineStep::ProcessorStep(proc));
                     }

@@ -1,0 +1,53 @@
+---
+# Upward-expansion example: restore macro-dynamics on over-compressed masters.
+#
+# The expander boosts signal above the threshold (the inverse of a compressor),
+# re-opening transients that loudness-war mastering crushed. The crest-factor
+# gate keeps it near-dormant on material that is already dynamic, so it only
+# engages on genuinely compressed sources. A soft clip_limit provides peak
+# safety since expansion raises peaks.
+devices:
+  samplerate: 44100
+  chunksize: 4096
+  resampler: null
+  capture:
+    type: RawFile
+    filename: "dummy"
+    channels: 2
+    format: S16_LE
+  playback:
+    type: File
+    filename: "dummy"
+    channels: 2
+    format: S16_LE
+
+processors:
+  restore_dynamics:
+    type: Expander
+    parameters:
+      channels: 2
+      # Watch and process both channels.
+      monitor_channels: [0, 1]
+      process_channels: [0, 1]
+      # Fairly slow envelope so only macro-dynamics are affected.
+      attack: 0.05
+      release: 0.5
+      # Boost signal above -20 dB.
+      threshold: -20
+      # Gentle 1.5:1 expansion, ceilinged at +4 dB of added gain.
+      ratio: 1.5
+      max_gain_db: 4.0
+      mode: Upward
+      makeup_gain: 0
+      # Peak safety: soft-clip anything the boost pushes above -0.5 dBFS.
+      soft_clip: true
+      clip_limit: -0.5
+      # Crest-factor gate: full effect at/below 9 dB crest (compressed),
+      # tapering to zero by 15 dB crest (already dynamic).
+      crest_gate: true
+      crest_floor_db: 9.0
+      crest_ceiling_db: 15.0
+
+pipeline:
+  - type: Processor
+    name: restore_dynamics

@@ -20,6 +20,7 @@ use crate::config;
 
 pub mod compressor;
 pub mod declipper;
+pub mod expander;
 pub mod noisegate;
 pub mod race;
 

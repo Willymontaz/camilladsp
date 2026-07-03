@@ -157,6 +157,7 @@ enum WsCommand {
     GetIspAttenuation,
     GetDeclippedSamples,
     ResetDeclippedSamples,
+    GetExpansionGain,
     Exit,
     Stop,
     None,
@@ -470,6 +471,10 @@ enum WsReply {
     },
     ResetDeclippedSamples {
         result: WsResult,
+    },
+    GetExpansionGain {
+        result: WsResult,
+        value: f32,
     },
     Exit {
         result: WsResult,
@@ -1669,6 +1674,13 @@ fn handle_command(
             shared_data_inst.processing_params.set_declipped_samples(0);
             Some(WsReply::ResetDeclippedSamples {
                 result: WsResult::Ok,
+            })
+        }
+        WsCommand::GetExpansionGain => {
+            let gain_db = shared_data_inst.processing_params.expansion_gain();
+            Some(WsReply::GetExpansionGain {
+                result: WsResult::Ok,
+                value: gain_db,
             })
         }
         WsCommand::None => None,
