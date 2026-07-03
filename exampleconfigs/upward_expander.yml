@@ -48,6 +48,43 @@ processors:
       crest_floor_db: 9.0
       crest_ceiling_db: 15.0
 
+  # Adaptive-threshold variant: instead of a fixed threshold, the effective
+  # threshold tracks a slow envelope of the program level, so the expander
+  # emphasises transients that stick OUT above the current musical level (drum
+  # kicks, accents) rather than boosting everything when a whole passage gets
+  # louder. The bar bounces on transients and settles back to ~0 in sustained
+  # passages, with no manual threshold riding.
+  emphasise_transients:
+    type: Expander
+    parameters:
+      channels: 2
+      monitor_channels: [0, 1]
+      process_channels: [0, 1]
+      # Fast attack to catch transients; moderate release.
+      attack: 0.01
+      release: 0.2
+      # With adaptive_threshold on, `threshold` is only the ABSOLUTE FLOOR: quiet
+      # content below it is never touched.
+      threshold: -45
+      ratio: 3.0
+      max_gain_db: 6.0
+      mode: Upward
+      # Track the program level and boost only what pokes >= 3 dB above it.
+      adaptive_threshold: true
+      relative_offset_db: 3.0
+      # Adaptation window: larger = slower to follow level changes (more bounce,
+      # but a newly-loud section briefly boosts before the threshold catches up);
+      # smaller = tracks tighter (less bounce). 0.4 s is a good start.
+      adapt_time: 0.4
+      # The crest gate defaults OFF in adaptive mode (the adaptive threshold is
+      # the "don't over-process" mechanism), so it is omitted here.
+      soft_clip: true
+      clip_limit: -0.5
+
 pipeline:
+  # Fixed-threshold restoration (default). Swap to `emphasise_transients` for the
+  # program-relative adaptive behaviour.
   - type: Processor
     name: restore_dynamics
+  # - type: Processor
+  #   name: emphasise_transients

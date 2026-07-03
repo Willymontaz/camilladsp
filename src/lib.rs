@@ -267,6 +267,10 @@ pub struct ProcessingParameters {
     // positive == upward boost, negative == downward attenuation). Surfaced to the
     // websocket so the crest gate's behaviour can be observed in real time.
     expansion_gain: AtomicU32,
+    // Current effective threshold of the Expander, in dB. When the expander runs
+    // in adaptive mode this tracks the program level; otherwise it is the fixed
+    // threshold. Surfaced so a monitor can watch the threshold follow the music.
+    adaptive_threshold: AtomicU32,
 }
 
 impl ProcessingParameters {
@@ -303,6 +307,7 @@ impl ProcessingParameters {
             truepeak_attenuation: AtomicU32::new(0.0f32.to_bits()),
             declipped_samples: AtomicUsize::new(0),
             expansion_gain: AtomicU32::new(0.0f32.to_bits()),
+            adaptive_threshold: AtomicU32::new(0.0f32.to_bits()),
         }
     }
 
@@ -407,6 +412,18 @@ impl ProcessingParameters {
     /// The current expansion gain applied by the expander, in dB.
     pub fn expansion_gain(&self) -> f32 {
         f32::from_bits(self.expansion_gain.load(Ordering::Relaxed))
+    }
+
+    /// Set the expander's current effective threshold in dB (adaptive when the
+    /// expander tracks the program level, else the fixed threshold).
+    pub fn set_adaptive_threshold(&self, threshold_db: f32) {
+        self.adaptive_threshold
+            .store(threshold_db.to_bits(), Ordering::Relaxed)
+    }
+
+    /// The expander's current effective threshold in dB.
+    pub fn adaptive_threshold(&self) -> f32 {
+        f32::from_bits(self.adaptive_threshold.load(Ordering::Relaxed))
     }
 }
 

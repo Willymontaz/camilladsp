@@ -158,6 +158,7 @@ enum WsCommand {
     GetDeclippedSamples,
     ResetDeclippedSamples,
     GetExpansionGain,
+    GetAdaptiveThreshold,
     Exit,
     Stop,
     None,
@@ -473,6 +474,10 @@ enum WsReply {
         result: WsResult,
     },
     GetExpansionGain {
+        result: WsResult,
+        value: f32,
+    },
+    GetAdaptiveThreshold {
         result: WsResult,
         value: f32,
     },
@@ -1681,6 +1686,13 @@ fn handle_command(
             Some(WsReply::GetExpansionGain {
                 result: WsResult::Ok,
                 value: gain_db,
+            })
+        }
+        WsCommand::GetAdaptiveThreshold => {
+            let threshold_db = shared_data_inst.processing_params.adaptive_threshold();
+            Some(WsReply::GetAdaptiveThreshold {
+                result: WsResult::Ok,
+                value: threshold_db,
             })
         }
         WsCommand::None => None,

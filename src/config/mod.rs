@@ -1650,6 +1650,19 @@ pub struct ExpanderParameters {
     pub crest_ceiling_db: Option<PrcFmt>,
     #[serde(default)]
     pub knee_db: Option<PrcFmt>,
+    /// Make the threshold track a slow envelope of the program level, so the
+    /// expander emphasises transients that stick out above the current musical
+    /// level rather than boosting everything when a whole passage gets louder.
+    /// The fixed `threshold` then acts as an absolute floor.
+    #[serde(default)]
+    pub adaptive_threshold: Option<bool>,
+    /// dB the adaptive threshold sits above the running program level (>= 0).
+    #[serde(default)]
+    pub relative_offset_db: Option<PrcFmt>,
+    /// Time constant (seconds) of the slow program-level envelope that the
+    /// adaptive threshold follows.
+    #[serde(default)]
+    pub adapt_time: Option<PrcFmt>,
 }
 
 impl ExpanderParameters {
@@ -1691,6 +1704,18 @@ impl ExpanderParameters {
 
     pub fn knee_db(&self) -> PrcFmt {
         self.knee_db.unwrap_or(6.0)
+    }
+
+    pub fn adaptive_threshold(&self) -> bool {
+        self.adaptive_threshold.unwrap_or(false)
+    }
+
+    pub fn relative_offset_db(&self) -> PrcFmt {
+        self.relative_offset_db.unwrap_or(3.0)
+    }
+
+    pub fn adapt_time(&self) -> PrcFmt {
+        self.adapt_time.unwrap_or(0.4)
     }
 }
 

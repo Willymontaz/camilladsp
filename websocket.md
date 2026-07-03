@@ -131,6 +131,9 @@ Commands for reading and changing settings for the websocket server.
 - `GetTruePeakAttenuation` : get the gain reduction in dB currently applied by the master-bus
   `TruePeak` limiter. `0.0` means no limiting; negative values mean the limiter is active.
   Always `0.0` when no `TruePeak` processor is present in the pipeline.
+- `GetAdaptiveThreshold` : get the `Expander`'s current effective threshold in dB. When the
+  expander runs in adaptive mode this tracks the program level; otherwise it is the fixed
+  threshold. Useful for watching the adaptive threshold follow the music.
 - `GetStateFilePath` : get the current state file path, returns null if no state file is used.
 - `GetStateFileUpdated` : check if all changes have been saved to the state file.
 

@@ -86,6 +86,18 @@ pub struct Expander {
     // attack-smoothed output that drives the gain computer.
     pub level_peak: PrcFmt,
     pub level_env: PrcFmt,
+    // Adaptive (program-relative) threshold. When `adaptive`, the effective
+    // threshold tracks `level_slow` (a slow envelope of the program level) plus
+    // `relative_offset`, so only transients that stick out above the current
+    // musical level are expanded; the fixed `threshold` becomes an absolute
+    // floor. `level_slow` is a slowly-smoothed copy of `level_peak` so it
+    // converges with `level_env` on steady material (applied gain -> 0).
+    pub adaptive: bool,
+    pub relative_offset: PrcFmt,
+    pub level_slow: PrcFmt,
+    pub slow_coef: PrcFmt,
+    // Effective threshold (dB) of the last processed sample, for telemetry.
+    last_eff_threshold: PrcFmt,
     // Crest-factor gate.
     pub crest_gate: bool,
     pub crest_floor_db: PrcFmt,
@@ -126,12 +138,18 @@ impl Expander {
         let release = (-1.0 / srate / config.release).exp();
         let crest_ms_coeff = (-1.0 / srate / CREST_RMS_TC).exp();
         let crest_peak_coeff = (-1.0 / srate / CREST_PEAK_TC).exp();
+        let slow_coef = (-1.0 / srate / config.adapt_time()).exp();
+        let adaptive = config.adaptive_threshold();
+        // When adaptive, the running-level threshold already keeps the effect off
+        // steady/dynamic material, so the crest gate defaults OFF (a clean,
+        // readable bounce) unless the user set it explicitly.
+        let crest_gate = config.crest_gate.unwrap_or(!adaptive);
         let clip_limit = config.clip_limit.map(db_to_linear);
 
         let scratch = vec![0.0; chunksize];
 
         debug!(
-            "Creating expander '{}', channels: {}, monitor_channels: {:?}, process_channels: {:?}, attack: {}, release: {}, threshold: {}, ratio: {}, max_gain_db: {}, knee_db: {}, mode: {:?}, makeup_gain: {}, crest_gate: {}, crest_floor_db: {}, crest_ceiling_db: {}, soft_clip: {}, clip_limit: {:?}",
+            "Creating expander '{}', channels: {}, monitor_channels: {:?}, process_channels: {:?}, attack: {}, release: {}, threshold: {}, ratio: {}, max_gain_db: {}, knee_db: {}, mode: {:?}, makeup_gain: {}, adaptive_threshold: {}, relative_offset_db: {}, adapt_time: {}, crest_gate: {}, crest_floor_db: {}, crest_ceiling_db: {}, soft_clip: {}, clip_limit: {:?}",
             name,
             channels,
             monitor_channels,
@@ -144,7 +162,10 @@ impl Expander {
             config.knee_db(),
             config.mode(),
             config.makeup_gain(),
-            config.crest_gate(),
+            adaptive,
+            config.relative_offset_db(),
+            config.adapt_time(),
+            crest_gate,
             config.crest_floor_db(),
             config.crest_ceiling_db(),
             config.soft_clip(),
@@ -178,7 +199,12 @@ impl Expander {
             scratch,
             level_peak: -100.0,
             level_env: -100.0,
-            crest_gate: config.crest_gate(),
+            adaptive,
+            relative_offset: config.relative_offset_db(),
+            level_slow: -100.0,
+            slow_coef,
+            last_eff_threshold: config.threshold,
+            crest_gate,
             crest_floor_db: config.crest_floor_db(),
             crest_ceiling_db: config.crest_ceiling_db(),
             // Start the estimator with a high crest (silent RMS floor, full-scale
@@ -247,7 +273,8 @@ impl Expander {
     }
 
     /// Follow the loudness envelope (dB) of the linked magnitude in self.scratch,
-    /// replacing each sample with the smoothed envelope level.
+    /// replacing each sample with its dB excess `over` above the (possibly
+    /// adaptive) threshold — the quantity the gain law consumes.
     ///
     /// Uses the smooth decoupled peak detector of Giannoulis, Massberg & Reiss
     /// (JAES 2012): an instantaneous-attack, exponential-release peak follower
@@ -256,6 +283,14 @@ impl Expander {
     /// expander mode while decoupling the effective attack time from the release
     /// state, unlike a naive branching detector that switches coefficient on the
     /// sign of each sample-to-sample step.
+    ///
+    /// A second, slower smoothing of `level_peak` (`level_slow`) tracks the
+    /// program level. When `adaptive`, the threshold follows it
+    /// (`level_slow + relative_offset`, floored at the fixed `threshold`), so the
+    /// excess reflects how far a transient pokes above the *current* musical
+    /// level rather than above a fixed line. Because `level_slow` and `level_env`
+    /// converge on steady material, the excess (and thus the boost) returns to
+    /// ~0 in sustained passages and only bounces up on transients.
     fn estimate_loudness(&mut self) {
         for val in self.scratch.iter_mut() {
             let level = 20.0 * (*val + 1.0e-9).log10();
@@ -265,18 +300,27 @@ impl Expander {
             self.level_peak = level.max(released);
             // One-pole attack smoothing of the peak follower's output.
             self.level_env = self.attack * self.level_env + (1.0 - self.attack) * self.level_peak;
-            *val = self.level_env;
+            // Slow program-level envelope (same source, longer time constant).
+            self.level_slow = self.slow_coef * self.level_slow + (1.0 - self.slow_coef) * self.level_peak;
+            let eff_threshold = if self.adaptive {
+                self.threshold.max(self.level_slow + self.relative_offset)
+            } else {
+                self.threshold
+            };
+            self.last_eff_threshold = eff_threshold;
+            *val = self.level_env - eff_threshold;
         }
     }
 
-    /// Calculate linear gain from the loudness envelope in self.scratch, replacing
-    /// it with the per-sample linear gain. `gate` scales the expansion depth.
-    /// Returns the signed applied expansion (dB, before makeup) of largest
-    /// magnitude across the chunk, for activity telemetry (0 dB == idle).
+    /// Calculate linear gain from the per-sample threshold excess `over` already
+    /// in self.scratch (written by `estimate_loudness`), replacing it with the
+    /// per-sample linear gain. `gate` scales the expansion depth. Returns the
+    /// signed applied expansion (dB, before makeup) of largest magnitude across
+    /// the chunk, for activity telemetry (0 dB == idle).
     fn calculate_linear_gain(&mut self, gate: PrcFmt) -> PrcFmt {
         let mut peak_expansion: PrcFmt = 0.0;
         for val in self.scratch.iter_mut() {
-            let over = *val - self.threshold;
+            let over = *val;
             // Raw expansion gain in dB, positive above threshold (upward) and
             // negative below (downward), proportional to how far the envelope
             // exceeds/undershoots the threshold. A soft knee smooths the slope
@@ -352,6 +396,10 @@ impl Processor for Expander {
             self.apply_limiter(&mut input.waveforms[*ch]);
         }
         self.processing_params.set_expansion_gain(expansion as f32);
+        // Surface the currently-active threshold (adaptive when enabled, the
+        // fixed threshold otherwise) so a monitor can watch it track the program.
+        self.processing_params
+            .set_adaptive_threshold(self.last_eff_threshold as f32);
         Ok(())
     }
 
@@ -376,6 +424,9 @@ impl Processor for Expander {
             }
             let attack = (-1.0 / srate / config.attack).exp();
             let release = (-1.0 / srate / config.release).exp();
+            let slow_coef = (-1.0 / srate / config.adapt_time()).exp();
+            let adaptive = config.adaptive_threshold();
+            let crest_gate = config.crest_gate.unwrap_or(!adaptive);
             let clip_limit = config.clip_limit.map(db_to_linear);
 
             let limiter = if let Some(limit) = config.clip_limit {
@@ -399,13 +450,16 @@ impl Processor for Expander {
             self.half_knee = 0.5 * config.knee_db();
             self.mode = config.mode();
             self.makeup_gain = config.makeup_gain();
-            self.crest_gate = config.crest_gate();
+            self.adaptive = adaptive;
+            self.relative_offset = config.relative_offset_db();
+            self.slow_coef = slow_coef;
+            self.crest_gate = crest_gate;
             self.crest_floor_db = config.crest_floor_db();
             self.crest_ceiling_db = config.crest_ceiling_db();
             self.limiter = limiter;
 
             debug!(
-                "Updated expander '{}', monitor_channels: {:?}, process_channels: {:?}, attack: {}, release: {}, threshold: {}, ratio: {}, max_gain_db: {}, knee_db: {}, mode: {:?}, makeup_gain: {}, crest_gate: {}, crest_floor_db: {}, crest_ceiling_db: {}, soft_clip: {}, clip_limit: {:?}",
+                "Updated expander '{}', monitor_channels: {:?}, process_channels: {:?}, attack: {}, release: {}, threshold: {}, ratio: {}, max_gain_db: {}, knee_db: {}, mode: {:?}, makeup_gain: {}, adaptive_threshold: {}, relative_offset_db: {}, adapt_time: {}, crest_gate: {}, crest_floor_db: {}, crest_ceiling_db: {}, soft_clip: {}, clip_limit: {:?}",
                 self.name,
                 self.monitor_channels,
                 self.process_channels,
@@ -417,7 +471,10 @@ impl Processor for Expander {
                 config.knee_db(),
                 config.mode(),
                 config.makeup_gain(),
-                config.crest_gate(),
+                adaptive,
+                config.relative_offset_db(),
+                config.adapt_time(),
+                crest_gate,
                 config.crest_floor_db(),
                 config.crest_ceiling_db(),
                 config.soft_clip(),
@@ -451,6 +508,10 @@ pub fn validate_expander(config: &config::ExpanderParameters) -> Res<()> {
     }
     if config.crest_gate() && config.crest_ceiling_db() <= config.crest_floor_db() {
         let msg = "crest_ceiling_db must be greater than crest_floor_db.";
+        return Err(config::ConfigError::new(msg).into());
+    }
+    if config.adaptive_threshold() && config.adapt_time() <= 0.0 {
+        let msg = "adapt_time must be larger than zero when adaptive_threshold is enabled.";
         return Err(config::ConfigError::new(msg).into());
     }
     for ch in config.monitor_channels().iter() {
@@ -507,6 +568,9 @@ mod tests {
             crest_floor_db: None,
             crest_ceiling_db: None,
             knee_db: None,
+            adaptive_threshold: None,
+            relative_offset_db: None,
+            adapt_time: None,
         }
     }
 
@@ -870,5 +934,156 @@ mod tests {
         p = params(-20.0, 2.0, ExpanderMode::Upward);
         p.process_channels = Some(vec![5]);
         assert!(validate_expander(&p).is_err());
+
+        // Adaptive with non-positive adapt_time.
+        p = params(-20.0, 2.0, ExpanderMode::Upward);
+        p.adaptive_threshold = Some(true);
+        p.adapt_time = Some(0.0);
+        assert!(validate_expander(&p).is_err());
+    }
+
+    /// Build an adaptive-mode parameter set (crest gate left off so it does not
+    /// interfere with observing the adaptive threshold's behavior).
+    fn adaptive_params(threshold: PrcFmt, ratio: PrcFmt) -> ExpanderParameters {
+        let mut p = params(threshold, ratio, ExpanderMode::Upward);
+        p.adaptive_threshold = Some(true);
+        p.relative_offset_db = Some(3.0); // == default half_knee (knee_db 6) -> steady over sits at knee edge
+        p.adapt_time = Some(0.4);
+        p
+    }
+
+    /// Key regression: when a whole passage gets louder, adaptive mode must NOT
+    /// keep boosting the steady content — the threshold rises with the program
+    /// level so a sustained loud tone settles back to ~unity gain. With adaptive
+    /// off, the same loud steady tone is boosted.
+    #[test]
+    fn adaptive_ignores_steady_program_level() {
+        let threshold = -50.0; // absolute floor well below the signal
+        let value = db_to_linear(-10.0); // loud, far above the floor
+        // Adaptive: after the slow envelope settles, steady loud -> ~unity.
+        let (mut exp, _pp) = make(adaptive_params(threshold, 4.0));
+        let out = run(&mut exp, &constant(N_6S, value));
+        let gain = steady_gain(&out, value);
+        assert!(
+            (gain - 1.0).abs() < 0.03,
+            "adaptive steady loud tone should settle to unity, gain {}",
+            gain
+        );
+        // Fixed threshold: the same loud tone sits far above threshold -> boosted
+        // (and clamped at max_gain 6 dB).
+        let (mut exp, _pp) = make(params(threshold, 4.0, ExpanderMode::Upward));
+        let out = run(&mut exp, &constant(N_6S, value));
+        let gain_fixed = steady_gain(&out, value);
+        assert!(
+            gain_fixed > 1.5,
+            "fixed-threshold steady loud tone should be boosted, gain {}",
+            gain_fixed
+        );
+    }
+
+    /// The bar bounces on a transient above the running level and returns to ~0
+    /// once the slow envelope catches up to the new sustained level.
+    #[test]
+    fn adaptive_bounces_on_transient_then_settles() {
+        let threshold = -50.0;
+        let bed = db_to_linear(-30.0);
+        let hot = db_to_linear(-10.0);
+        let (mut exp, pp) = make(adaptive_params(threshold, 4.0));
+        // Settle on the bed level (>> adapt_time).
+        run(&mut exp, &constant(N_6S, bed));
+        let bed_gain = pp.expansion_gain();
+        assert!(
+            bed_gain.abs() < 0.5,
+            "steady bed should read ~0, got {} dB",
+            bed_gain
+        );
+        // A single chunk jumping to a much higher level: the fast envelope leads
+        // the slow one -> strong positive expansion (the bounce).
+        run(&mut exp, &constant(CHUNK, hot));
+        let bounce = pp.expansion_gain();
+        assert!(
+            bounce > 3.0,
+            "expected the transient to bounce the expander up, got {} dB",
+            bounce
+        );
+        // Hold the higher level: the slow envelope catches up and the boost
+        // returns toward 0 (not pumping).
+        run(&mut exp, &constant(N_6S, hot));
+        let settled = pp.expansion_gain();
+        assert!(
+            settled.abs() < 0.5,
+            "sustained loud level should settle back to ~0, got {} dB",
+            settled
+        );
+    }
+
+    /// The absolute `threshold` remains a hard floor in adaptive mode: content
+    /// below it is never boosted, even though the adaptive threshold would sit
+    /// lower.
+    #[test]
+    fn adaptive_respects_absolute_floor() {
+        let threshold = -20.0;
+        let value = db_to_linear(-30.0); // below the floor
+        let (mut exp, _pp) = make(adaptive_params(threshold, 4.0));
+        let out = run(&mut exp, &constant(N_6S, value));
+        let gain = steady_gain(&out, value);
+        assert!(
+            (gain - 1.0).abs() < 1e-3,
+            "content below the absolute floor must be untouched, gain {}",
+            gain
+        );
+    }
+
+    /// The adaptive-threshold telemetry tracks the program level: it rises when
+    /// the sustained level rises, and equals the fixed threshold when adaptive
+    /// mode is off.
+    #[test]
+    fn adaptive_threshold_telemetry_tracks_level() {
+        let threshold = -50.0;
+        let (mut exp, pp) = make(adaptive_params(threshold, 4.0));
+        run(&mut exp, &constant(N_6S, db_to_linear(-30.0)));
+        let thr_low = pp.adaptive_threshold();
+        run(&mut exp, &constant(N_6S, db_to_linear(-10.0)));
+        let thr_high = pp.adaptive_threshold();
+        assert!(
+            thr_high > thr_low + 10.0,
+            "adaptive threshold did not track the level rise: {} -> {}",
+            thr_low,
+            thr_high
+        );
+        // Non-adaptive: telemetry reports the fixed threshold.
+        let (mut exp, pp) = make(params(-20.0, 2.0, ExpanderMode::Upward));
+        run(&mut exp, &constant(N_1S, db_to_linear(-6.0)));
+        assert!(
+            (pp.adaptive_threshold() - (-20.0)).abs() < 1e-3,
+            "non-adaptive threshold telemetry should equal the fixed threshold, got {}",
+            pp.adaptive_threshold()
+        );
+    }
+
+    /// The crest gate defaults OFF in adaptive mode (unless set explicitly), and
+    /// stays ON by default when adaptive is off.
+    #[test]
+    fn crest_gate_default_follows_adaptive_mode() {
+        // Adaptive on, crest_gate unset -> off.
+        let mut p = params(-20.0, 2.0, ExpanderMode::Upward);
+        p.adaptive_threshold = Some(true);
+        p.crest_gate = None;
+        let (exp, _pp) = make(p);
+        assert!(!exp.crest_gate, "crest gate should default off in adaptive mode");
+
+        // Adaptive off, crest_gate unset -> on.
+        let mut p = params(-20.0, 2.0, ExpanderMode::Upward);
+        p.adaptive_threshold = None;
+        p.crest_gate = None;
+        let (exp, _pp) = make(p);
+        assert!(exp.crest_gate, "crest gate should default on when not adaptive");
+
+        // Explicit setting wins over the adaptive default.
+        let mut p = params(-20.0, 2.0, ExpanderMode::Upward);
+        p.adaptive_threshold = Some(true);
+        p.crest_gate = Some(true);
+        let (exp, _pp) = make(p);
+        assert!(exp.crest_gate, "explicit crest_gate should override the adaptive default");
     }
 }
