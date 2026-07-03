@@ -105,6 +105,7 @@
     background: rgba(46,194,126,.15); color: var(--idle); border: 1px solid rgba(46,194,126,.4);
   }
   .state.active { background: rgba(255,176,32,.18); color: var(--active); border-color: rgba(255,176,32,.5); box-shadow: 0 0 12px rgba(255,176,32,.3); }
+  .state.bypassed { background: rgba(120,140,170,.12); color: #7f8ea8; border-color: rgba(120,140,170,.35); border-style: dashed; }
   .state.na { background: var(--panel-2); color: var(--text-dim); border-color: var(--border); }
 
   /* --- horizontal db bar meter --- */
@@ -275,15 +276,19 @@ const cards = {
   declip: {
     key: "declip", title: "Declipper", sub: "clip restoration (samples repaired)",
     cmd: "GetDeclippedSamples", kind: "counter",
+    procType: "Declipper",   // pipeline processor type -> read its bypass state
     count: 0, prevCount: null, rate: 0, lastCountTs: null,
     lastActiveTs: -1e9, lastBlinkTs: -1e9, history: newHistory(),
+    pipeline: { known: false, present: false, bypassed: false },
     probe: { needed: true, ok: null, firstReplyTs: null },
   },
   expand: {
     key: "expand", title: "Upward Expander", sub: "dynamics restoration",
     cmd: "GetExpansionGain", unit: "dB", scaleMax: CFG.expandScaleMax,
     threshold: CFG.expandThresholdDb, kind: "bar",
+    procType: "Expander",    // pipeline processor type -> read its bypass state
     current: 0, peakHold: 0, lastActiveTs: -1e9, history: newHistory(),
+    pipeline: { known: false, present: false, bypassed: false },
     probe: { needed: true, ok: null, firstReplyTs: null },
   },
 };
@@ -370,6 +375,7 @@ function onOpen() {
   probeDeadline = now() + CFG.probeTimeoutMs;
   for (const c of Object.values(cards)) {
     if (c.probe.needed) { c.probe.ok = null; c.probe.firstReplyTs = null; }
+    if (c.pipeline) c.pipeline.known = false;  // re-read bypass state on reconnect
   }
 
   // Align the server's metering refresh to our poll cadence, then start polling.
@@ -407,6 +413,7 @@ function startPolling() {
 }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
+let pollCount = 0;
 function poll() {
   send("GetSignalLevels");
   send("GetIspAttenuation");
@@ -415,6 +422,12 @@ function poll() {
   if (cards.declip.probe.ok !== false) send("GetDeclippedSamples");
   send("GetProcessingLoad");
   send("GetState");
+  // The full config is heavier and rarely changes; poll it ~once per second to
+  // learn whether each processor is enabled or bypassed in the pipeline.
+  if (pollCount % Math.max(1, Math.round(1000 / CFG.pollIntervalMs)) === 0) {
+    send("GetConfigJson");
+  }
+  pollCount++;
 }
 
 // ---- reply dispatch (replies are keyed by command name) ----
@@ -438,9 +451,34 @@ const dispatch = {
   GetState(v)          { ctx.state = v; },
   GetVersion(v)        { ctx.version = v; },
   GetConfigTitle(v)    { ctx.title = v; },
+  GetConfigJson(v)     { updatePipelineState(v); },
   SetUpdateInterval() {},
   ResetDeclippedSamples() {},
 };
+
+// Read the live config to learn, per processor card, whether its pipeline step
+// exists and whether it is bypassed. This is what lets the UI tell "enabled but
+// not correcting" (IDLE) apart from "bypassed/disabled" (BYPASSED).
+function updatePipelineState(configStr) {
+  let config;
+  try { config = JSON.parse(configStr); } catch (e) { return; }
+  const pipeline = config.pipeline || [];
+  const processors = config.processors || {};
+  for (const card of Object.values(cards)) {
+    if (!card.procType) continue;
+    let present = false, bypassed = false;
+    for (const step of pipeline) {
+      if (step.type !== "Processor") continue;
+      const proc = processors[step.name];
+      if (proc && proc.type === card.procType) {
+        present = true;
+        bypassed = step.bypassed === true;
+        break;
+      }
+    }
+    card.pipeline = { known: true, present, bypassed };
+  }
+}
 
 const ctx = { version: null, title: null, load: null, state: null };
 
@@ -700,9 +738,31 @@ function render() {
   for (const card of Object.values(cards)) {
     if (card.probe.ok === false) continue;
     const active = (t - card.lastActiveTs) < CFG.activeLatchMs;
-    if (active) allIdle = false;
-    card.el.state.textContent = active ? "ACTIVE" : "IDLE";
-    card.el.state.className = "state" + (active ? " active" : "");
+    // Bypass state (declipper/expander only; ISP is a resampler feature, not a
+    // pipeline step). Three-way: BYPASSED (disabled) / IDLE (enabled, not doing
+    // anything) / ACTIVE (currently correcting). "known" gates until the first
+    // config poll lands so we don't flash BYPASSED on connect.
+    const pl = card.pipeline;
+    if (pl && pl.known && card.procType) {
+      if (!pl.present) {
+        card.el.state.textContent = "ABSENT";
+        card.el.state.className = "state na";
+      } else if (pl.bypassed) {
+        card.el.state.textContent = "BYPASSED";
+        card.el.state.className = "state bypassed";
+      } else if (active) {
+        card.el.state.textContent = "ACTIVE";
+        card.el.state.className = "state active";
+        allIdle = false;
+      } else {
+        card.el.state.textContent = "IDLE";
+        card.el.state.className = "state";
+      }
+    } else {
+      if (active) allIdle = false;
+      card.el.state.textContent = active ? "ACTIVE" : "IDLE";
+      card.el.state.className = "state" + (active ? " active" : "");
+    }
 
     if (card.kind === "bar") {
       // decay peak-hold marker
