@@ -835,10 +835,19 @@ function renderVolMeter(suffix, m, decay) {
 // ---------- canvas drawing ----------
 function fitCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-    canvas.width = w * dpr; canvas.height = h * dpr;
+  // Logical height: capture the intended CSS height ONCE from the initial
+  // `height` attribute and pin it via style. Deriving it from clientHeight is a
+  // trap -- there is no CSS height, so writing the backing-store `height`
+  // attribute changes the rendered height, which feeds back into clientHeight
+  // on HiDPI (dpr>1) and makes the canvas grow every frame (the "zoom").
+  if (canvas.__cssH === undefined) {
+    canvas.__cssH = canvas.height || canvas.clientHeight || 60;
+    canvas.style.height = canvas.__cssH + "px";
   }
+  const w = canvas.clientWidth;   // width is pinned by CSS (width:100%)
+  const h = canvas.__cssH;
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
   const ctx2 = canvas.getContext("2d");
   ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx: ctx2, w, h };
