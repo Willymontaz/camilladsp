@@ -11,7 +11,7 @@
     - ISP guard      (GetIspAttenuation)   -- resampler intersample-peak limiter
     - Declipper      (GetDeclippedSamples) -- source-repair clip restoration
     - Upward expander(GetExpansionGain)    -- dynamics restoration
-  plus a program-level IN vs OUT volume panel fed from GetSignalLevels
+  plus a program-level IN vs OUT volume panel fed from GetSignalLevelsSince
   (capture_* = chain input, playback_* = post-processing output).
 
   Protocol: the current server speaks JSON over the websocket. A unit command is
@@ -229,6 +229,15 @@ const CFG = {
   historySeconds: 60,        // rolling sparkline / timeline window
   activeLatchMs: 1500,       // how long an ACTIVE state stays latched after an event
   channelReduce: "max",      // "max" | "mean" -- how per-channel arrays collapse
+  // Fixed RMS integration window for the IN/OUT meters. Using a windowed RMS
+  // (GetSignalLevelsSince) instead of the last single chunk does two things:
+  //  - stabilises the reading (a permanent averaging window, not a jumpy
+  //    ~chunk-sized value), and
+  //  - because the window (hundreds of ms) is far longer than the capture->
+  //    playback latency (device buffering + any plugin look-ahead, tens of ms),
+  //    it makes that IN/OUT time-offset negligible so the levels line up and the
+  //    (out - in) delta settles to the true chain gain.
+  levelWindowSec: 0.4,
   volScale: { min: -60, max: 0 },   // dBFS meter range for IN/OUT
   clipZoneDb: -1,            // headroom/clip zone starts here on the volume meter
   peakHoldDecayDbPerSec: 12, // peak-hold marker decay rate (all meters)
@@ -293,7 +302,7 @@ const cards = {
   },
 };
 
-// IN / OUT volume state (fed from GetSignalLevels)
+// IN / OUT volume state (fed from GetSignalLevelsSince -- windowed RMS)
 const vol = {
   in:  { rms: -100, peak: -100, peakHold: CFG.volScale.min, history: newHistory() },
   out: { rms: -100, peak: -100, peakHold: CFG.volScale.min, history: newHistory() },
@@ -415,7 +424,8 @@ function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = 
 
 let pollCount = 0;
 function poll() {
-  send("GetSignalLevels");
+  // Windowed RMS (see CFG.levelWindowSec): stable + time-offset-tolerant.
+  send({ GetSignalLevelsSince: CFG.levelWindowSec });
   send("GetIspAttenuation");
   // Only poll the maybe-unavailable commands while probing or once confirmed OK.
   if (cards.expand.probe.ok !== false) send("GetExpansionGain");
@@ -432,7 +442,7 @@ function poll() {
 
 // ---- reply dispatch (replies are keyed by command name) ----
 const dispatch = {
-  GetSignalLevels(v) {
+  GetSignalLevelsSince(v) {
     const t = now();
     vol.in.rms   = reduceChannels(v.capture_rms);
     vol.in.peak  = reduceChannels(v.capture_peak);
