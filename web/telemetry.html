@@ -8,16 +8,16 @@
 
   It connects to the CamillaDSP websocket and shows, in real time, when the
   corrective processors engage:
-    - ISP guard      (GetIspAttenuation)   -- resampler intersample-peak limiter
-    - Declipper      (GetDeclippedSamples) -- source-repair clip restoration
-    - Upward expander(GetExpansionGain)    -- dynamics restoration
+    - True-peak      (GetTruePeakAttenuation) -- master-bus DAC-protect limiter
+    - Declipper      (GetDeclippedSamples)    -- source-repair clip restoration
+    - Upward expander(GetExpansionGain)       -- dynamics restoration
   plus a program-level IN vs OUT volume panel fed from GetSignalLevelsSince
   (capture_* = chain input, playback_* = post-processing output).
 
   Protocol: the current server speaks JSON over the websocket. A unit command is
-  a bare JSON string ("GetIspAttenuation"); an argument command is a JSON object
+  a bare JSON string ("GetTruePeakAttenuation"); an argument command is a JSON object
   ({"SetUpdateInterval":100}). Replies are keyed by command name:
-  {"GetIspAttenuation":{"result":"Ok","value":0.8}}. Errors carry a non-"Ok"
+  {"GetTruePeakAttenuation":{"result":"Ok","value":0.8}}. Errors carry a non-"Ok"
   result, and an unparseable command comes back as {"Invalid":{"error":...}}.
   (This is NOT the legacy text protocol used by the stale web/camilla.html.)
 -->
@@ -144,7 +144,7 @@
   .log { font-family: var(--mono); font-size: 12px; max-height: 220px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
   .log div { padding: 1px 0; white-space: nowrap; }
   .log .ts { color: var(--text-dim); }
-  .log .tag-isp { color: var(--accent); }
+  .log .tag-truepeak { color: var(--accent); }
   .log .tag-declip { color: var(--alert); }
   .log .tag-expand { color: var(--active); }
   .log .tag-conn { color: var(--text-dim); }
@@ -241,9 +241,9 @@ const CFG = {
   volScale: { min: -60, max: 0 },   // dBFS meter range for IN/OUT
   clipZoneDb: -1,            // headroom/clip zone starts here on the volume meter
   peakHoldDecayDbPerSec: 12, // peak-hold marker decay rate (all meters)
-  ispScaleMax: 6,            // ISP attenuation bar full-scale (dB)
+  truePeakScaleMax: 6,       // true-peak attenuation bar full-scale (dB)
   expandScaleMax: 12,        // expander gain bar full-scale (dB)
-  ispThresholdDb: 0.05,      // ISP considered active above this attenuation
+  truePeakThresholdDb: 0.05, // true-peak limiter considered active above this attenuation
   expandThresholdDb: 0.05,   // expander considered active above this gain
   probeTimeoutMs: 1500,      // window to decide a command is unavailable
   logMax: 800,               // bounded event log length
@@ -275,12 +275,14 @@ function wallTime(perfTs) { return new Date(clockBase.wall + (perfTs - clockBase
 
 // Per-processor cards. `probe` marks whether the command is available.
 const cards = {
-  isp: {
-    key: "isp", title: "ISP Guard", sub: "resampler intersample-peak limiter",
-    cmd: "GetIspAttenuation", unit: "dB", scaleMax: CFG.ispScaleMax,
-    threshold: CFG.ispThresholdDb, kind: "bar",
+  truepeak: {
+    key: "truepeak", title: "True-Peak Limiter", sub: "master-bus DAC guard",
+    cmd: "GetTruePeakAttenuation", unit: "dB", scaleMax: CFG.truePeakScaleMax,
+    threshold: CFG.truePeakThresholdDb, kind: "bar",
+    procType: "TruePeak",    // pipeline processor type -> read its bypass state
     current: 0, peakHold: 0, lastActiveTs: -1e9, history: newHistory(),
-    probe: { needed: false, ok: true },  // exists in current build
+    pipeline: { known: false, present: false, bypassed: false },
+    probe: { needed: false, ok: true },  // command exists in current build
   },
   declip: {
     key: "declip", title: "Declipper", sub: "clip restoration (samples repaired)",
@@ -426,7 +428,7 @@ let pollCount = 0;
 function poll() {
   // Windowed RMS (see CFG.levelWindowSec): stable + time-offset-tolerant.
   send({ GetSignalLevelsSince: CFG.levelWindowSec });
-  send("GetIspAttenuation");
+  send("GetTruePeakAttenuation");
   // Only poll the maybe-unavailable commands while probing or once confirmed OK.
   if (cards.expand.probe.ok !== false) send("GetExpansionGain");
   if (cards.declip.probe.ok !== false) send("GetDeclippedSamples");
@@ -454,7 +456,7 @@ const dispatch = {
     pushHistory(vol.in.history,  t, vol.in.rms);
     pushHistory(vol.out.history, t, vol.out.rms);
   },
-  GetIspAttenuation(v) { updateBarCard(cards.isp, v); },
+  GetTruePeakAttenuation(v) { updateBarCard(cards.truepeak, v); },
   GetExpansionGain(v)  { markProbe(cards.expand); updateBarCard(cards.expand, v); },
   GetDeclippedSamples(v) { markProbe(cards.declip); updateDeclip(v); },
   GetProcessingLoad(v) { ctx.load = v; },
@@ -748,10 +750,10 @@ function render() {
   for (const card of Object.values(cards)) {
     if (card.probe.ok === false) continue;
     const active = (t - card.lastActiveTs) < CFG.activeLatchMs;
-    // Bypass state (declipper/expander only; ISP is a resampler feature, not a
-    // pipeline step). Three-way: BYPASSED (disabled) / IDLE (enabled, not doing
-    // anything) / ACTIVE (currently correcting). "known" gates until the first
-    // config poll lands so we don't flash BYPASSED on connect.
+    // Bypass state for pipeline processors (declipper/expander/true-peak).
+    // Three-way: BYPASSED (disabled) / IDLE (enabled, not doing anything) /
+    // ACTIVE (currently correcting). "known" gates until the first config poll
+    // lands so we don't flash BYPASSED on connect.
     const pl = card.pipeline;
     if (pl && pl.known && card.procType) {
       if (!pl.present) {
@@ -869,7 +871,7 @@ function drawSpark(card, scaleMax) {
   const thY = h - (card.threshold / scaleMax) * h;
   c.beginPath(); c.moveTo(0, thY); c.lineTo(w, thY); c.stroke();
   c.beginPath();
-  c.strokeStyle = card.key === "isp" ? "#4aa3ff" : "#ffb020";
+  c.strokeStyle = card.key === "truepeak" ? "#4aa3ff" : "#ffb020";
   c.lineWidth = 1.5;
   for (let i = 0; i < hist.length; i++) {
     const x = timeX(hist[i].t, tNow, w);

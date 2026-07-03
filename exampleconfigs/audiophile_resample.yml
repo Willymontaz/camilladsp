@@ -11,7 +11,11 @@
 #   taps: 256                (>= 120 dB stopband at oversampling 256)
 #   oversampling: 256        (cubic Lagrange between branches keeps the
 #                            interpolation error well below the filter floor)
-#   isp_guard.ceiling_dbfs: -1.0  (DAC-safe headroom)
+#
+# Intersample-peak protection is provided by the master-bus `TruePeak`
+# processor placed last in the pipeline (see `dac_guard` below), not by the
+# resampler itself. That way it also guards peaks created by any post-resampler
+# stage (TubeStage, EQ, gain).
 #
 # Alternative characters:
 #   MinimumPhase   front-loaded impulse, no pre-ring; some prefer it for
@@ -31,10 +35,6 @@ devices:
     character: LinearPhase
     taps: 256
     oversampling: 256
-    isp_guard:
-      enabled: true
-      ceiling_dbfs: -1.0
-      release_ms: 50.0
   capture:
     type: RawFile
     filename: "dummy"
@@ -45,3 +45,17 @@ devices:
     filename: "dummy"
     channels: 2
     format: S16_LE
+
+processors:
+  # Master-bus true-peak limiter: caps the DAC feed at -1.0 dBFS using a 4x
+  # oversampled true-peak detector + lookahead limiter. Place it last.
+  dac_guard:
+    type: TruePeak
+    parameters:
+      channels: 2
+      ceiling_dbfs: -1.0
+      release_ms: 50.0
+
+pipeline:
+  - type: Processor
+    name: dac_guard

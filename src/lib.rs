@@ -256,10 +256,10 @@ pub struct ProcessingParameters {
     mute: [AtomicBool; Self::NUM_FADERS],
     processing_load: AtomicU32,
     resampler_load: AtomicU32,
-    // Current attenuation applied by the resampler's intersample-peak guard,
-    // in dB (0.0 == no limiting, negative == limiting active). Surfaced to
-    // the websocket so monitoring tools can show DAC-protect headroom.
-    isp_attenuation: AtomicU32,
+    // Current attenuation applied by the master-bus true-peak limiter, in dB
+    // (0.0 == no limiting, negative == limiting active). Surfaced to the
+    // websocket so monitoring tools can show DAC-protect headroom.
+    truepeak_attenuation: AtomicU32,
     // Cumulative number of samples repaired by the Declipper processor.
     // Reset to zero via `set_declipped_samples(0)` to measure a fresh interval.
     declipped_samples: AtomicUsize,
@@ -300,7 +300,7 @@ impl ProcessingParameters {
             ],
             processing_load: AtomicU32::new(0.0f32.to_bits()),
             resampler_load: AtomicU32::new(0.0f32.to_bits()),
-            isp_attenuation: AtomicU32::new(0.0f32.to_bits()),
+            truepeak_attenuation: AtomicU32::new(0.0f32.to_bits()),
             declipped_samples: AtomicUsize::new(0),
             expansion_gain: AtomicU32::new(0.0f32.to_bits()),
         }
@@ -371,16 +371,16 @@ impl ProcessingParameters {
         f32::from_bits(self.resampler_load.load(Ordering::Relaxed))
     }
 
-    /// Set the current attenuation in dB applied by the resampler's
-    /// intersample-peak guard (0.0 means no limiting, negative values mean
-    /// limiting is active to protect downstream DAC headroom).
-    pub fn set_isp_attenuation(&self, attenuation_db: f32) {
-        self.isp_attenuation
+    /// Set the current attenuation in dB applied by the master-bus true-peak
+    /// limiter (0.0 means no limiting, negative values mean limiting is active
+    /// to protect downstream DAC headroom).
+    pub fn set_truepeak_attenuation(&self, attenuation_db: f32) {
+        self.truepeak_attenuation
             .store(attenuation_db.to_bits(), Ordering::Relaxed)
     }
 
-    pub fn isp_attenuation(&self) -> f32 {
-        f32::from_bits(self.isp_attenuation.load(Ordering::Relaxed))
+    pub fn truepeak_attenuation(&self) -> f32 {
+        f32::from_bits(self.truepeak_attenuation.load(Ordering::Relaxed))
     }
 
     /// Add to the cumulative count of samples repaired by the declipper.

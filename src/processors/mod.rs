@@ -23,6 +23,7 @@ pub mod declipper;
 pub mod expander;
 pub mod noisegate;
 pub mod race;
+pub mod truepeak;
 
 pub trait Processor {
     // Process a chunk containing several channels.

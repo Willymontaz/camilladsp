@@ -1,4 +1,3 @@
-pub mod isp_guard;
 pub mod polyphase;
 
 use crate::PrcFmt;
@@ -9,7 +8,6 @@ use crate::utils::stash::{container_from_stash, recycle_container, vec_from_stas
 use audioadapter_buffers::direct::{
     InterleavedSlice, SequentialSliceOfVecs, SparseSequentialSliceOfVecs,
 };
-use isp_guard::IspGuard;
 use polyphase::PolyphaseFir;
 use rubato::{
     Async, Fft, FixedAsync, FixedSync, Indexing, PolynomialDegree, Resampler,
@@ -239,10 +237,9 @@ pub fn new_resampler(
             character,
             taps,
             oversampling,
-            isp_guard,
         }) => {
             debug!(
-                "Creating Polyphase resampler: character={character:?}, taps={taps}, oversampling={oversampling}, isp_guard={isp_guard:?}"
+                "Creating Polyphase resampler: character={character:?}, taps={taps}, oversampling={oversampling}"
             );
             let poly = PolyphaseFir::new(
                 capture_samplerate,
@@ -254,20 +251,8 @@ pub fn new_resampler(
                 *oversampling,
             )
             .unwrap_or_else(|err| panic!("Failed to construct Polyphase resampler: {err}"));
-            let inner: Box<dyn Resampler<PrcFmt>> = Box::new(poly);
-            let final_resampler: Box<dyn Resampler<PrcFmt>> = match isp_guard {
-                Some(cfg) if cfg.enabled() => Box::new(IspGuard::new(
-                    inner,
-                    cfg.ceiling_dbfs(),
-                    cfg.release_ms(),
-                    true,
-                    samplerate,
-                    processing_params.clone(),
-                )),
-                _ => inner,
-            };
             Some(ChunkResampler {
-                resampler: final_resampler,
+                resampler: Box::new(poly),
                 indexing,
                 secs_per_chunk,
                 overloaded_chunks: 0,

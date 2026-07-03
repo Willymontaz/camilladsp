@@ -289,6 +289,15 @@ impl Pipeline {
                                 );
                                 Box::new(expander) as Box<dyn Processor>
                             }
+                            config::Processor::TruePeak { parameters, .. } => {
+                                let truepeak = processors::truepeak::TruePeak::from_config(
+                                    &step.name,
+                                    parameters,
+                                    conf.devices.samplerate,
+                                    processing_params.clone(),
+                                );
+                                Box::new(truepeak) as Box<dyn Processor>
+                            }
                         };
                         steps.push(PipelineStep::ProcessorStep(proc));
                     }

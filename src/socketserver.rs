@@ -154,7 +154,7 @@ enum WsCommand {
     GetAvailablePlaybackDevices(String),
     GetProcessingLoad,
     GetResamplerLoad,
-    GetIspAttenuation,
+    GetTruePeakAttenuation,
     GetDeclippedSamples,
     ResetDeclippedSamples,
     GetExpansionGain,
@@ -461,7 +461,7 @@ enum WsReply {
         result: WsResult,
         value: f32,
     },
-    GetIspAttenuation {
+    GetTruePeakAttenuation {
         result: WsResult,
         value: f32,
     },
@@ -1656,9 +1656,9 @@ fn handle_command(
                 value: load,
             })
         }
-        WsCommand::GetIspAttenuation => {
-            let atten_db = shared_data_inst.processing_params.isp_attenuation();
-            Some(WsReply::GetIspAttenuation {
+        WsCommand::GetTruePeakAttenuation => {
+            let atten_db = shared_data_inst.processing_params.truepeak_attenuation();
+            Some(WsReply::GetTruePeakAttenuation {
                 result: WsResult::Ok,
                 value: atten_db,
             })
