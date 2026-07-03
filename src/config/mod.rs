@@ -1582,6 +1582,11 @@ pub enum Processor {
         description: Option<String>,
         parameters: RACEParameters,
     },
+    Declipper {
+        #[serde(default)]
+        description: Option<String>,
+        parameters: DeclipperParameters,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1667,6 +1672,62 @@ impl RACEParameters {
 
     pub fn delay_unit(&self) -> TimeUnit {
         self.delay_unit.unwrap_or(TimeUnit::Milliseconds)
+    }
+}
+
+#[derive(Clone, Debug, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum DeclipMethod {
+    Cubic,
+    Ar,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DeclipperParameters {
+    pub channels: usize,
+    #[serde(default)]
+    pub process_channels: Option<Vec<usize>>,
+    #[serde(default)]
+    pub clip_threshold: Option<PrcFmt>,
+    #[serde(default)]
+    pub min_clip_len: Option<usize>,
+    #[serde(default)]
+    pub max_clip_len: Option<usize>,
+    #[serde(default)]
+    pub method: Option<DeclipMethod>,
+    #[serde(default)]
+    pub ar_order: Option<usize>,
+    #[serde(default)]
+    pub makeup_gain_db: Option<PrcFmt>,
+}
+
+impl DeclipperParameters {
+    pub fn process_channels(&self) -> Vec<usize> {
+        self.process_channels.clone().unwrap_or_default()
+    }
+
+    pub fn clip_threshold(&self) -> PrcFmt {
+        self.clip_threshold.unwrap_or(0.985)
+    }
+
+    pub fn min_clip_len(&self) -> usize {
+        self.min_clip_len.unwrap_or(2)
+    }
+
+    pub fn max_clip_len(&self) -> usize {
+        self.max_clip_len.unwrap_or(64)
+    }
+
+    pub fn method(&self) -> DeclipMethod {
+        self.method.unwrap_or(DeclipMethod::Cubic)
+    }
+
+    pub fn ar_order(&self) -> usize {
+        self.ar_order.unwrap_or(32)
+    }
+
+    pub fn makeup_gain_db(&self) -> PrcFmt {
+        self.makeup_gain_db.unwrap_or(0.0)
     }
 }
 

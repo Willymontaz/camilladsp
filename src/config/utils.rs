@@ -18,6 +18,7 @@ use crate::config::*;
 use crate::filters;
 use crate::mixer;
 use crate::processors::compressor;
+use crate::processors::declipper;
 use crate::processors::noisegate;
 use crate::processors::race;
 use crate::utils::wavtools::find_data_in_wav_stream;
@@ -488,10 +489,22 @@ pub fn config_diff(currentconf: &Configuration, newconf: &Configuration) -> Conf
     if let (Some(newprocs), Some(oldprocs)) = (&newconf.processors, &currentconf.processors) {
         for (proc, params) in newprocs {
             // The pipeline didn't change, any added processor isn't included and can be skipped
-            if let Some(current_proc) = oldprocs.get(proc)
-                && params != current_proc
-            {
-                processors.push(proc.to_string());
+            if let Some(current_proc) = oldprocs.get(proc) {
+                // Did the processor change type? A type change needs a full rebuild
+                // since the running processor can only apply a matching parameter update.
+                match (params, current_proc) {
+                    (Processor::Compressor { .. }, Processor::Compressor { .. })
+                    | (Processor::NoiseGate { .. }, Processor::NoiseGate { .. })
+                    | (Processor::RACE { .. }, Processor::RACE { .. })
+                    | (Processor::Declipper { .. }, Processor::Declipper { .. }) => {}
+                    _ => {
+                        return ConfigChange::Pipeline;
+                    }
+                };
+                // Only parameters changed, ok to update
+                if params != current_proc {
+                    processors.push(proc.to_string());
+                }
             }
         }
     }
@@ -787,6 +800,26 @@ pub fn validate_config(conf: &mut Configuration, filename: Option<&str>) -> Res<
                                             Err(err) => {
                                                 let msg = format!(
                                                     "Invalid RACE processor '{}'. Reason: {}",
+                                                    step.name, err
+                                                );
+                                                return Err(ConfigError::new(&msg).into());
+                                            }
+                                        }
+                                    }
+                                    Processor::Declipper { parameters, .. } => {
+                                        let channels = parameters.channels;
+                                        if channels != num_channels {
+                                            let msg = format!(
+                                                "Declipper '{}' has wrong number of channels. Expected {}, found {}.",
+                                                step.name, num_channels, channels
+                                            );
+                                            return Err(ConfigError::new(&msg).into());
+                                        }
+                                        match declipper::validate_declipper(parameters) {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                let msg = format!(
+                                                    "Invalid declipper '{}'. Reason: {}",
                                                     step.name, err
                                                 );
                                                 return Err(ConfigError::new(&msg).into());

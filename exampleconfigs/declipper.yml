@@ -1,0 +1,53 @@
+---
+# Example config demonstrating the Declipper processor.
+#
+# The declipper repairs digitally clipped (flat-topped) masters by detecting
+# flat clip runs and reconstructing the missing waveform peaks from the
+# surrounding unclipped context, restoring peaks that overshoot 0 dBFS. It runs
+# a lookahead delay line so clips that straddle chunk boundaries are handled.
+#
+# Because reconstruction pushes peaks above 0 dBFS, pair it with a downstream
+# true-peak/headroom guard, or set `makeup_gain_db` to a small negative value to
+# make room for the restored overshoot.
+#
+# Repair activity is reported through the websocket commands
+# `GetDeclippedSamples` / `ResetDeclippedSamples` (cumulative repaired-sample
+# count) so a clean library reads 0 and repaired tracks are flagged.
+devices:
+  samplerate: 44100
+  chunksize: 4096
+  resampler: null
+  capture:
+    type: RawFile
+    filename: "dummy"
+    channels: 2
+    format: S16_LE
+  playback:
+    type: File
+    filename: "dummy"
+    channels: 2
+    format: S16_LE
+
+processors:
+  declip:
+    type: Declipper
+    parameters:
+      channels: 2
+      # Optional; defaults to all channels.
+      process_channels: [0, 1]
+      # Linear full-scale threshold above which a flat run counts as a clip.
+      clip_threshold: 0.985
+      # Ignore runs shorter than this (legitimate single-sample transients).
+      min_clip_len: 2
+      # Clips longer than this can't be reliably reconstructed; passed through.
+      max_clip_len: 64
+      # "Cubic" (cheap Hermite interpolation, ships default) or
+      # "Ar" (autoregressive/LPC extrapolation, higher quality for longer clips).
+      method: Ar
+      ar_order: 32
+      # Attenuation applied to the whole output to absorb the restored overshoot.
+      makeup_gain_db: -1.0
+
+pipeline:
+  - type: Processor
+    name: declip

@@ -155,6 +155,8 @@ enum WsCommand {
     GetProcessingLoad,
     GetResamplerLoad,
     GetIspAttenuation,
+    GetDeclippedSamples,
+    ResetDeclippedSamples,
     Exit,
     Stop,
     None,
@@ -461,6 +463,13 @@ enum WsReply {
     GetIspAttenuation {
         result: WsResult,
         value: f32,
+    },
+    GetDeclippedSamples {
+        result: WsResult,
+        value: usize,
+    },
+    ResetDeclippedSamples {
+        result: WsResult,
     },
     Exit {
         result: WsResult,
@@ -1647,6 +1656,19 @@ fn handle_command(
             Some(WsReply::GetIspAttenuation {
                 result: WsResult::Ok,
                 value: atten_db,
+            })
+        }
+        WsCommand::GetDeclippedSamples => {
+            let value = shared_data_inst.processing_params.declipped_samples();
+            Some(WsReply::GetDeclippedSamples {
+                result: WsResult::Ok,
+                value,
+            })
+        }
+        WsCommand::ResetDeclippedSamples => {
+            shared_data_inst.processing_params.set_declipped_samples(0);
+            Some(WsReply::ResetDeclippedSamples {
+                result: WsResult::Ok,
             })
         }
         WsCommand::None => None,

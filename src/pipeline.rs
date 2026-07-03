@@ -269,6 +269,16 @@ impl Pipeline {
                                 );
                                 Box::new(race) as Box<dyn Processor>
                             }
+                            config::Processor::Declipper { parameters, .. } => {
+                                let declipper = processors::declipper::Declipper::from_config(
+                                    &step.name,
+                                    parameters,
+                                    conf.devices.samplerate,
+                                    conf.devices.chunksize,
+                                    processing_params.clone(),
+                                );
+                                Box::new(declipper) as Box<dyn Processor>
+                            }
                         };
                         steps.push(PipelineStep::ProcessorStep(proc));
                     }

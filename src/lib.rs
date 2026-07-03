@@ -59,7 +59,7 @@ use std::error;
 use std::fmt;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 
 // Logging macros to give extra logs
@@ -260,6 +260,9 @@ pub struct ProcessingParameters {
     // in dB (0.0 == no limiting, negative == limiting active). Surfaced to
     // the websocket so monitoring tools can show DAC-protect headroom.
     isp_attenuation: AtomicU32,
+    // Cumulative number of samples repaired by the Declipper processor.
+    // Reset to zero via `set_declipped_samples(0)` to measure a fresh interval.
+    declipped_samples: AtomicUsize,
 }
 
 impl ProcessingParameters {
@@ -294,6 +297,7 @@ impl ProcessingParameters {
             processing_load: AtomicU32::new(0.0f32.to_bits()),
             resampler_load: AtomicU32::new(0.0f32.to_bits()),
             isp_attenuation: AtomicU32::new(0.0f32.to_bits()),
+            declipped_samples: AtomicUsize::new(0),
         }
     }
 
@@ -372,6 +376,21 @@ impl ProcessingParameters {
 
     pub fn isp_attenuation(&self) -> f32 {
         f32::from_bits(self.isp_attenuation.load(Ordering::Relaxed))
+    }
+
+    /// Add to the cumulative count of samples repaired by the declipper.
+    pub fn add_declipped_samples(&self, count: usize) {
+        self.declipped_samples.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// The cumulative count of samples repaired by the declipper.
+    pub fn declipped_samples(&self) -> usize {
+        self.declipped_samples.load(Ordering::Relaxed)
+    }
+
+    /// Set the declipped-samples counter, e.g. to zero to start a fresh interval.
+    pub fn set_declipped_samples(&self, count: usize) {
+        self.declipped_samples.store(count, Ordering::Relaxed);
     }
 }
 
