@@ -241,11 +241,15 @@ const CFG = {
 };
 
 // ---------- URL params & connection bar prefill ----------
+// Prefer values injected by CamillaDSP's --telemetry launcher (window.CDSP_PARAMS),
+// which is robust even when a browser drops the query string from a file:// URL.
+// Fall back to ?host=/?port= for manually-opened pages, then to defaults.
 const params = new URLSearchParams(location.search);
+const injected = window.CDSP_PARAMS || {};
 const hostEl = document.getElementById("host");
 const portEl = document.getElementById("port");
-hostEl.value = params.get("host") || "localhost";
-portEl.value = params.get("port") || "1234";
+hostEl.value = injected.host || params.get("host") || "localhost";
+portEl.value = injected.port || params.get("port") || "1234";
 document.getElementById("histSpan").textContent = CFG.historySeconds;
 
 // ============================================================================

@@ -122,6 +122,74 @@ pub fn custom_logger_format(
     )
 }
 
+// The telemetry GUI is a single self-contained HTML file (see web/telemetry.html).
+// It is embedded into the binary so `--telemetry` works regardless of where the
+// executable is installed: the page is written to a temp file at runtime and the
+// default browser is opened at it, pre-filled with the websocket host and port.
+#[cfg(feature = "websocket")]
+const TELEMETRY_HTML: &str = include_str!("../web/telemetry.html");
+
+// Percent-encode the characters that would break a file:// URL path (mainly
+// spaces, which are common in Windows temp paths under a user profile).
+#[cfg(feature = "websocket")]
+fn encode_url_path(path: &str) -> String {
+    path.chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '\\' => "/".to_string(),
+            '#' => "%23".to_string(),
+            '?' => "%3F".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
+#[cfg(feature = "websocket")]
+fn open_telemetry_gui(host: &str, port: usize) {
+    let path = env::temp_dir().join("camilladsp-telemetry.html");
+    // Inject the host/port as a global before the page's own script runs. This is
+    // robust even when a browser drops the query string from a file:// URL; the
+    // ?host=/?port= params are still added below for good measure.
+    let page = format!(
+        "<script>window.CDSP_PARAMS={{host:\"{host}\",port:\"{port}\"}};</script>\n{TELEMETRY_HTML}"
+    );
+    if let Err(err) = std::fs::write(&path, page) {
+        warn!("Could not write telemetry GUI to {}: {}", path.display(), err);
+        return;
+    }
+    let encoded = encode_url_path(&path.to_string_lossy());
+    // file:// URLs use a leading slash before a drive letter on Windows.
+    let prefix = if cfg!(windows) { "file:///" } else { "file://" };
+    let url = format!("{prefix}{encoded}?host={host}&port={port}");
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(&url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", &url]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&url);
+        c
+    };
+
+    match cmd.spawn() {
+        Ok(_) => info!("Opened telemetry GUI in browser: {}", url),
+        Err(err) => warn!(
+            "Could not open a browser for the telemetry GUI ({}). Open this file manually: {}",
+            err, url
+        ),
+    }
+}
+
 fn parse_gain_value(v: &str) -> Result<f32, String> {
     if let Ok(gain) = v.parse::<f32>()
         && (-120.0..=20.0).contains(&gain)
@@ -842,6 +910,14 @@ fn main_process() -> i32 {
                 .requires("statefile")
                 .conflicts_with("configfile")
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("telemetry")
+                .long("telemetry")
+                .display_order(210)
+                .help("Open the real-time telemetry GUI in the default web browser")
+                .requires("port")
+                .action(ArgAction::SetTrue),
         );
     #[cfg(feature = "secure-websocket")]
     let clapapp = clapapp
@@ -1240,6 +1316,17 @@ fn main_process() -> i32 {
                 cert_pass: matches.get_one::<String>("pass").map(|x| x.as_str()),
             };
             socketserver::start_server(server_params, shared_data);
+
+            if matches.get_flag("telemetry") {
+                // The server binds to 127.0.0.1 by default; when bound to all
+                // interfaces the browser must still reach it via loopback.
+                let host = if serveraddress == "0.0.0.0" {
+                    "127.0.0.1"
+                } else {
+                    serveraddress.as_str()
+                };
+                open_telemetry_gui(host, serverport);
+            }
         }
 
         if let Some(fname) = &statefilename {
