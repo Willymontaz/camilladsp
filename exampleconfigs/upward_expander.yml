@@ -69,15 +69,20 @@ processors:
       ratio: 3.0
       max_gain_db: 6.0
       mode: Upward
-      # Track the program level and boost only what pokes >= 3 dB above it.
+      # Track the program level; boost what pokes above it. A small dead-zone
+      # (relative_offset_db) keeps steady material near unity while still letting
+      # the small transients of a compressed mix through.
       adaptive_threshold: true
-      relative_offset_db: 3.0
+      relative_offset_db: 1.0
       # Adaptation window: larger = slower to follow level changes (more bounce,
       # but a newly-loud section briefly boosts before the threshold catches up);
       # smaller = tracks tighter (less bounce). 0.4 s is a good start.
       adapt_time: 0.4
-      # The crest gate defaults OFF in adaptive mode (the adaptive threshold is
-      # the "don't over-process" mechanism), so it is omitted here.
+      # crest_gate (on by default) makes program crest drive the effective ratio:
+      # a compressed, low-crest mix gets the full `ratio`, while already-dynamic
+      # material tapers toward ratio 1 (no expansion). So the expander does MORE
+      # on crushed material and backs off on good material. Tune the crest window
+      # with crest_floor_db / crest_ceiling_db.
       soft_clip: true
       clip_limit: -0.5
 

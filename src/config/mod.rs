@@ -1711,7 +1711,7 @@ impl ExpanderParameters {
     }
 
     pub fn relative_offset_db(&self) -> PrcFmt {
-        self.relative_offset_db.unwrap_or(3.0)
+        self.relative_offset_db.unwrap_or(1.0)
     }
 
     pub fn adapt_time(&self) -> PrcFmt {

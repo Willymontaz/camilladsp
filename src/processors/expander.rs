@@ -98,7 +98,8 @@ pub struct Expander {
     pub slow_coef: PrcFmt,
     // Effective threshold (dB) of the last processed sample, for telemetry.
     last_eff_threshold: PrcFmt,
-    // Crest-factor gate.
+    // Crest-factor driven ratio: when enabled, program crest scales the
+    // effective expansion ratio (compressed -> full ratio, dynamic -> ratio 1).
     pub crest_gate: bool,
     pub crest_floor_db: PrcFmt,
     pub crest_ceiling_db: PrcFmt,
@@ -140,10 +141,13 @@ impl Expander {
         let crest_peak_coeff = (-1.0 / srate / CREST_PEAK_TC).exp();
         let slow_coef = (-1.0 / srate / config.adapt_time()).exp();
         let adaptive = config.adaptive_threshold();
-        // When adaptive, the running-level threshold already keeps the effect off
-        // steady/dynamic material, so the crest gate defaults OFF (a clean,
-        // readable bounce) unless the user set it explicitly.
-        let crest_gate = config.crest_gate.unwrap_or(!adaptive);
+        // The crest measurement drives the effective expansion ratio (see
+        // `calculate_linear_gain`): full ratio on compressed program, tapering to
+        // ratio 1 (no expansion) on already-dynamic material. On by default, so
+        // the expander does more on crushed material and backs off on good
+        // material. Orthogonal to the adaptive threshold (which sets *where* the
+        // effect acts relative to the running level).
+        let crest_gate = config.crest_gate();
         let clip_limit = config.clip_limit.map(db_to_linear);
 
         let scratch = vec![0.0; chunksize];
@@ -242,11 +246,13 @@ impl Expander {
     }
 
     /// Update the running crest estimate from the (linear) linked monitor
-    /// magnitude currently in self.scratch, and return the gate factor in [0, 1] that scales
-    /// the expansion depth: 1.0 for compressed material (crest <= floor), ramping
-    /// to 0.0 as the crest approaches the ceiling (already dynamic). Must be called
-    /// before `estimate_loudness`, which overwrites the scratch buffer.
-    fn update_crest_gate(&mut self) -> PrcFmt {
+    /// magnitude currently in self.scratch, and return the crest scale in [0, 1]
+    /// that scales the effective expansion ratio (see `calculate_linear_gain`):
+    /// 1.0 for compressed material (crest <= floor) so the full ratio applies,
+    /// ramping to 0.0 as the crest approaches the ceiling (already dynamic) where
+    /// the effective ratio collapses to 1 (no expansion). Must be called before
+    /// `estimate_loudness`, which overwrites the scratch buffer.
+    fn update_crest_scale(&mut self) -> PrcFmt {
         for val in self.scratch.iter() {
             let x2 = *val * *val;
             self.crest_ms = self.crest_ms_coeff * self.crest_ms + (1.0 - self.crest_ms_coeff) * x2;
@@ -314,10 +320,19 @@ impl Expander {
 
     /// Calculate linear gain from the per-sample threshold excess `over` already
     /// in self.scratch (written by `estimate_loudness`), replacing it with the
-    /// per-sample linear gain. `gate` scales the expansion depth. Returns the
-    /// signed applied expansion (dB, before makeup) of largest magnitude across
-    /// the chunk, for activity telemetry (0 dB == idle).
-    fn calculate_linear_gain(&mut self, gate: PrcFmt) -> PrcFmt {
+    /// per-sample linear gain. Returns the signed applied expansion (dB, before
+    /// makeup) of largest magnitude across the chunk, for activity telemetry
+    /// (0 dB == idle).
+    ///
+    /// `crest_scale` (in [0, 1]) drives the **effective expansion ratio** rather
+    /// than gating the output: `effective_ratio = 1 + (ratio - 1) * crest_scale`.
+    /// So a compressed program (crest_scale ~1) gets the full ratio while an
+    /// already-dynamic program (crest_scale ~0) collapses to ratio 1, i.e. no
+    /// expansion. This makes the expander do *more* on crushed material and back
+    /// off on good material, instead of applying a fixed ratio and then gating —
+    /// which scaled the wrong way with the program's own dynamics.
+    fn calculate_linear_gain(&mut self, crest_scale: PrcFmt) -> PrcFmt {
+        let effective_ratio = 1.0 + (self.ratio - 1.0) * crest_scale;
         let mut peak_expansion: PrcFmt = 0.0;
         for val in self.scratch.iter_mut() {
             let over = *val;
@@ -327,14 +342,13 @@ impl Expander {
             // discontinuity at the threshold so program dwelling near it is not
             // gain-modulated abruptly (see `soft_knee_upward`).
             let expansion = match self.mode {
-                ExpanderMode::Upward => soft_knee_upward(over, self.ratio, self.half_knee),
-                ExpanderMode::Downward => -soft_knee_upward(-over, self.ratio, self.half_knee),
+                ExpanderMode::Upward => soft_knee_upward(over, effective_ratio, self.half_knee),
+                ExpanderMode::Downward => -soft_knee_upward(-over, effective_ratio, self.half_knee),
                 // Linear through the origin: already C1-continuous, no knee needed.
-                ExpanderMode::Both => over * (self.ratio - 1.0),
+                ExpanderMode::Both => over * (effective_ratio - 1.0),
             };
             // A hot passage (or a deep null in downward mode) must not run away.
-            let expansion = expansion.clamp(-self.max_gain, self.max_gain);
-            let applied = expansion * gate;
+            let applied = expansion.clamp(-self.max_gain, self.max_gain);
             if applied.abs() > peak_expansion.abs() {
                 peak_expansion = applied;
             }
@@ -388,9 +402,9 @@ impl Processor for Expander {
     /// Apply an Expander to an AudioChunk, modifying it in-place.
     fn process_chunk(&mut self, input: &mut AudioChunk) -> Res<()> {
         self.compute_linked_magnitude(input);
-        let gate = self.update_crest_gate();
+        let crest_scale = self.update_crest_scale();
         self.estimate_loudness();
-        let expansion = self.calculate_linear_gain(gate);
+        let expansion = self.calculate_linear_gain(crest_scale);
         for ch in self.process_channels.iter() {
             self.apply_gain(&mut input.waveforms[*ch]);
             self.apply_limiter(&mut input.waveforms[*ch]);
@@ -426,7 +440,7 @@ impl Processor for Expander {
             let release = (-1.0 / srate / config.release).exp();
             let slow_coef = (-1.0 / srate / config.adapt_time()).exp();
             let adaptive = config.adaptive_threshold();
-            let crest_gate = config.crest_gate.unwrap_or(!adaptive);
+            let crest_gate = config.crest_gate();
             let clip_limit = config.clip_limit.map(db_to_linear);
 
             let limiter = if let Some(limit) = config.clip_limit {
@@ -597,6 +611,28 @@ mod tests {
 
     fn constant(len: usize, value: PrcFmt) -> Vec<PrcFmt> {
         vec![value; len]
+    }
+
+    /// Run a signal through the expander and return the largest-magnitude
+    /// expansion telemetry value seen across all chunks (the reported value only
+    /// holds the last chunk, so transient bumps are otherwise missed).
+    fn run_peak_expansion(
+        exp: &mut Expander,
+        signal: &[PrcFmt],
+        pp: &Arc<ProcessingParameters>,
+    ) -> f32 {
+        let mut peak = 0.0f32;
+        for block in signal.chunks(CHUNK) {
+            let wave = block.to_vec();
+            let frames = wave.len();
+            let mut chunk = AudioChunk::new(vec![wave], 0.0, 0.0, frames, frames);
+            exp.process_chunk(&mut chunk).unwrap();
+            let e = pp.expansion_gain();
+            if e.abs() > peak.abs() {
+                peak = e;
+            }
+        }
+        peak
     }
 
     fn sine(len: usize, freq: PrcFmt, amp: PrcFmt) -> Vec<PrcFmt> {
@@ -1061,29 +1097,74 @@ mod tests {
         );
     }
 
-    /// The crest gate defaults OFF in adaptive mode (unless set explicitly), and
-    /// stays ON by default when adaptive is off.
+    /// The crest-driven ratio defaults ON in both modes (it is the inverse-
+    /// dynamics driver), and an explicit setting is honored.
     #[test]
-    fn crest_gate_default_follows_adaptive_mode() {
-        // Adaptive on, crest_gate unset -> off.
+    fn crest_gate_defaults_on() {
         let mut p = params(-20.0, 2.0, ExpanderMode::Upward);
         p.adaptive_threshold = Some(true);
         p.crest_gate = None;
-        let (exp, _pp) = make(p);
-        assert!(!exp.crest_gate, "crest gate should default off in adaptive mode");
+        assert!(make(p).0.crest_gate, "crest ratio should default on in adaptive mode");
 
-        // Adaptive off, crest_gate unset -> on.
         let mut p = params(-20.0, 2.0, ExpanderMode::Upward);
         p.adaptive_threshold = None;
         p.crest_gate = None;
-        let (exp, _pp) = make(p);
-        assert!(exp.crest_gate, "crest gate should default on when not adaptive");
+        assert!(make(p).0.crest_gate, "crest ratio should default on when not adaptive");
 
-        // Explicit setting wins over the adaptive default.
         let mut p = params(-20.0, 2.0, ExpanderMode::Upward);
-        p.adaptive_threshold = Some(true);
-        p.crest_gate = Some(true);
-        let (exp, _pp) = make(p);
-        assert!(exp.crest_gate, "explicit crest_gate should override the adaptive default");
+        p.crest_gate = Some(false);
+        assert!(!make(p).0.crest_gate, "explicit crest_gate=false should be honored");
+    }
+
+    /// The corrected cross-material behavior (the whole point of the crest-driven
+    /// ratio): in adaptive mode a compressed, low-crest program with small
+    /// transients is expanded, while an already-dynamic, high-crest program is
+    /// left essentially alone. Previously the fixed-ratio law did the opposite.
+    #[test]
+    fn adaptive_expands_compressed_more_than_dynamic() {
+        let threshold = -60.0; // absolute floor well below both signals
+
+        // Compressed: a steady bed with small +3 dB bumps -> low crest.
+        let mut pc = adaptive_params(threshold, 4.0);
+        pc.crest_gate = Some(true);
+        pc.relative_offset_db = Some(1.0);
+        let (mut exp, pp) = make(pc);
+        let bed = db_to_linear(-12.0);
+        let bump = db_to_linear(-9.0);
+        let mut compressed = vec![bed; N_6S];
+        for i in (0..N_6S).step_by(4000) {
+            for s in compressed.iter_mut().skip(i).take(200) {
+                *s = bump;
+            }
+        }
+        let compressed_boost = run_peak_expansion(&mut exp, &compressed, &pp);
+
+        // Dynamic: sharp full-scale impulses over near-silence -> high crest.
+        let mut pd = adaptive_params(threshold, 4.0);
+        pd.crest_gate = Some(true);
+        pd.relative_offset_db = Some(1.0);
+        let (mut exp, pp) = make(pd);
+        let mut dynamic = vec![0.0; N_6S];
+        for i in (0..N_6S).step_by(4000) {
+            dynamic[i] = 0.9;
+        }
+        let dynamic_boost = run_peak_expansion(&mut exp, &dynamic, &pp);
+
+        assert!(
+            compressed_boost > 3.0,
+            "compressed material should be expanded, got {} dB",
+            compressed_boost
+        );
+        assert!(
+            dynamic_boost.abs() < 0.5,
+            "already-dynamic material should be left alone, got {} dB",
+            dynamic_boost
+        );
+        assert!(
+            compressed_boost > dynamic_boost + 1.0,
+            "expected more expansion on compressed ({} dB) than dynamic ({} dB)",
+            compressed_boost,
+            dynamic_boost
+        );
     }
 }
