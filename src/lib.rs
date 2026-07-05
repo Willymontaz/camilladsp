@@ -271,6 +271,11 @@ pub struct ProcessingParameters {
     // in adaptive mode this tracks the program level; otherwise it is the fixed
     // threshold. Surfaced so a monitor can watch the threshold follow the music.
     adaptive_threshold: AtomicU32,
+    // Expander's last measured program crest (dB) and the resulting effective
+    // expansion ratio. Surfaced so the crest window can be tuned against real
+    // material (crest close to crest_ceiling_db => ratio near 1 => little effect).
+    expander_crest: AtomicU32,
+    expander_ratio: AtomicU32,
 }
 
 impl ProcessingParameters {
@@ -308,6 +313,8 @@ impl ProcessingParameters {
             declipped_samples: AtomicUsize::new(0),
             expansion_gain: AtomicU32::new(0.0f32.to_bits()),
             adaptive_threshold: AtomicU32::new(0.0f32.to_bits()),
+            expander_crest: AtomicU32::new(0.0f32.to_bits()),
+            expander_ratio: AtomicU32::new(1.0f32.to_bits()),
         }
     }
 
@@ -424,6 +431,28 @@ impl ProcessingParameters {
     /// The expander's current effective threshold in dB.
     pub fn adaptive_threshold(&self) -> f32 {
         f32::from_bits(self.adaptive_threshold.load(Ordering::Relaxed))
+    }
+
+    /// Set the expander's last measured program crest in dB (peak-to-RMS).
+    pub fn set_expander_crest(&self, crest_db: f32) {
+        self.expander_crest
+            .store(crest_db.to_bits(), Ordering::Relaxed)
+    }
+
+    /// The expander's last measured program crest in dB.
+    pub fn expander_crest(&self) -> f32 {
+        f32::from_bits(self.expander_crest.load(Ordering::Relaxed))
+    }
+
+    /// Set the expander's current effective expansion ratio (crest-driven).
+    pub fn set_expander_ratio(&self, ratio: f32) {
+        self.expander_ratio
+            .store(ratio.to_bits(), Ordering::Relaxed)
+    }
+
+    /// The expander's current effective expansion ratio.
+    pub fn expander_ratio(&self) -> f32 {
+        f32::from_bits(self.expander_ratio.load(Ordering::Relaxed))
     }
 }
 

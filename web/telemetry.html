@@ -165,6 +165,15 @@
   <label>port</label><input id="port" class="port" value="1234">
   <button class="primary" id="connectBtn">Connect</button>
   <button id="disconnectBtn" disabled>Disconnect</button>
+  <label>window</label>
+  <select id="histWindow">
+    <option value="5">5 s</option>
+    <option value="10">10 s</option>
+    <option value="15">15 s</option>
+    <option value="30">30 s</option>
+    <option value="60">60 s</option>
+    <option value="120">120 s</option>
+  </select>
   <span class="grow"></span>
   <span class="meta" id="connMeta"></span>
 </div>
@@ -262,6 +271,16 @@ hostEl.value = injected.host || params.get("host") || "localhost";
 portEl.value = injected.port || params.get("port") || "1234";
 document.getElementById("histSpan").textContent = CFG.historySeconds;
 
+// Time-window selector: mutate CFG.historySeconds live. pushHistory's trim and
+// the sparkline x-axis (timeX) both read it, so every chart + the IN/OUT
+// timeline re-scale on the next render -- no per-chart work needed.
+const histWindowEl = document.getElementById("histWindow");
+histWindowEl.value = String(CFG.historySeconds);
+histWindowEl.addEventListener("change", () => {
+  CFG.historySeconds = Number(histWindowEl.value);
+  document.getElementById("histSpan").textContent = CFG.historySeconds;
+});
+
 // ============================================================================
 // Metric state
 // ============================================================================
@@ -299,6 +318,7 @@ const cards = {
     threshold: CFG.expandThresholdDb, kind: "bar",
     procType: "Expander",    // pipeline processor type -> read its bypass state
     showThreshold: true,     // second readout: current (adaptive) threshold in dB
+    showCrest: true,         // third readout: measured crest + effective ratio
     current: 0, peakHold: 0, lastActiveTs: -1e9, history: newHistory(),
     pipeline: { known: false, present: false, bypassed: false },
     probe: { needed: true, ok: null, firstReplyTs: null },
@@ -431,7 +451,10 @@ function poll() {
   send({ GetSignalLevelsSince: CFG.levelWindowSec });
   send("GetTruePeakAttenuation");
   // Only poll the maybe-unavailable commands while probing or once confirmed OK.
-  if (cards.expand.probe.ok !== false) { send("GetExpansionGain"); send("GetAdaptiveThreshold"); }
+  if (cards.expand.probe.ok !== false) {
+    send("GetExpansionGain"); send("GetAdaptiveThreshold");
+    send("GetExpanderCrest"); send("GetExpanderRatio");
+  }
   if (cards.declip.probe.ok !== false) send("GetDeclippedSamples");
   send("GetProcessingLoad");
   send("GetState");
@@ -460,6 +483,8 @@ const dispatch = {
   GetTruePeakAttenuation(v) { updateBarCard(cards.truepeak, v); },
   GetExpansionGain(v)  { markProbe(cards.expand); updateBarCard(cards.expand, v); },
   GetAdaptiveThreshold(v) { if (cards.expand.el && cards.expand.el.thr) cards.expand.el.thr.textContent = v.toFixed(1); },
+  GetExpanderCrest(v) { if (cards.expand.el && cards.expand.el.crest) cards.expand.el.crest.textContent = v.toFixed(1); },
+  GetExpanderRatio(v) { if (cards.expand.el && cards.expand.el.ratio) cards.expand.el.ratio.textContent = v.toFixed(2); },
   GetDeclippedSamples(v) { markProbe(cards.declip); updateDeclip(v); },
   GetProcessingLoad(v) { ctx.load = v; },
   GetState(v)          { ctx.state = v; },
@@ -671,16 +696,24 @@ function buildCards() {
         ? `<div class="readout"><span>threshold (tracks program)</span>
              <span><b class="thr">&mdash;</b> ${card.unit}</span></div>`
         : "";
+      const crestRow = card.showCrest
+        ? `<div class="readout"><span>crest &middot; ratio</span>
+             <span><b class="crest">&mdash;</b> dB &middot; <b class="ratio">&mdash;</b>&times;</span></div>`
+        : "";
       body.innerHTML = `
         <div class="meter"><div class="fill"></div><div class="hold"></div></div>
         <div class="readout"><span>0 &rarr; ${card.scaleMax} ${card.unit}</span>
           <span><b class="cur">0.0</b> ${card.unit} &middot; pk <b class="pk">0.0</b></span></div>
-        ${thresholdRow}`;
+        ${thresholdRow}${crestRow}`;
       card.el.fill = body.querySelector(".fill");
       card.el.hold = body.querySelector(".hold");
       card.el.cur = body.querySelector(".cur");
       card.el.pk = body.querySelector(".pk");
       if (card.showThreshold) card.el.thr = body.querySelector(".thr");
+      if (card.showCrest) {
+        card.el.crest = body.querySelector(".crest");
+        card.el.ratio = body.querySelector(".ratio");
+      }
     } else if (card.kind === "counter") {
       body.innerHTML = `
         <div class="declip-grid">

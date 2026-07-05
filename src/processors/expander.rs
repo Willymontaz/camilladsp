@@ -98,6 +98,10 @@ pub struct Expander {
     pub slow_coef: PrcFmt,
     // Effective threshold (dB) of the last processed sample, for telemetry.
     last_eff_threshold: PrcFmt,
+    // Last measured crest (dB) and last effective expansion ratio, for telemetry
+    // so the crest window can be tuned by eye against real material.
+    last_crest_db: PrcFmt,
+    last_effective_ratio: PrcFmt,
     // Crest-factor driven ratio: when enabled, program crest scales the
     // effective expansion ratio (compressed -> full ratio, dynamic -> ratio 1).
     pub crest_gate: bool,
@@ -208,6 +212,8 @@ impl Expander {
             level_slow: -100.0,
             slow_coef,
             last_eff_threshold: config.threshold,
+            last_crest_db: config.crest_ceiling_db(),
+            last_effective_ratio: 1.0,
             crest_gate,
             crest_floor_db: config.crest_floor_db(),
             crest_ceiling_db: config.crest_ceiling_db(),
@@ -266,6 +272,7 @@ impl Expander {
         let rms = self.crest_ms.max(CREST_FLOOR).sqrt();
         let peak = self.crest_peak.max(CREST_FLOOR);
         let crest_db = 20.0 * (peak / rms).log10();
+        self.last_crest_db = crest_db;
         if !self.crest_gate {
             return 1.0;
         }
@@ -333,6 +340,7 @@ impl Expander {
     /// which scaled the wrong way with the program's own dynamics.
     fn calculate_linear_gain(&mut self, crest_scale: PrcFmt) -> PrcFmt {
         let effective_ratio = 1.0 + (self.ratio - 1.0) * crest_scale;
+        self.last_effective_ratio = effective_ratio;
         let mut peak_expansion: PrcFmt = 0.0;
         for val in self.scratch.iter_mut() {
             let over = *val;
@@ -414,6 +422,12 @@ impl Processor for Expander {
         // fixed threshold otherwise) so a monitor can watch it track the program.
         self.processing_params
             .set_adaptive_threshold(self.last_eff_threshold as f32);
+        // Surface the measured crest and the resulting effective ratio so the
+        // crest window (crest_floor_db / crest_ceiling_db) can be tuned by eye.
+        self.processing_params
+            .set_expander_crest(self.last_crest_db as f32);
+        self.processing_params
+            .set_expander_ratio(self.last_effective_ratio as f32);
         Ok(())
     }
 
@@ -1165,6 +1179,65 @@ mod tests {
             "expected more expansion on compressed ({} dB) than dynamic ({} dB)",
             compressed_boost,
             dynamic_boost
+        );
+    }
+
+    /// The crest and effective-ratio telemetry track the material, so the crest
+    /// window can be tuned by watching them: low-crest (compressed) -> ratio near
+    /// the configured value; high-crest (dynamic) -> ratio collapses toward 1.
+    #[test]
+    fn telemetry_reports_crest_and_effective_ratio() {
+        // Compressed / low-crest: a steady tone (~3 dB crest, below the 9 dB floor).
+        let mut pc = params(-60.0, 4.0, ExpanderMode::Upward);
+        pc.crest_gate = Some(true);
+        let (mut exp, pp) = make(pc);
+        run(&mut exp, &sine(N_6S, 1000.0, db_to_linear(-12.0)));
+        assert!(
+            pp.expander_crest() < 9.0,
+            "steady-tone crest should be low, got {} dB",
+            pp.expander_crest()
+        );
+        assert!(
+            pp.expander_ratio() > 3.0,
+            "compressed material should keep a near-full ratio, got {}",
+            pp.expander_ratio()
+        );
+
+        // Dynamic / high-crest: sharp impulses over near-silence.
+        let mut pd = params(-60.0, 4.0, ExpanderMode::Upward);
+        pd.crest_gate = Some(true);
+        let (mut exp, pp) = make(pd);
+        let mut imp = vec![0.0; N_6S];
+        for i in (0..N_6S).step_by(4000) {
+            imp[i] = 0.9;
+        }
+        run(&mut exp, &imp);
+        assert!(
+            pp.expander_crest() > 15.0,
+            "impulse-train crest should be high, got {} dB",
+            pp.expander_crest()
+        );
+        assert!(
+            pp.expander_ratio() < 1.5,
+            "dynamic material should collapse the ratio toward 1, got {}",
+            pp.expander_ratio()
+        );
+
+        // With the crest driver off, the effective ratio stays at the configured
+        // value regardless of material (and crest is still reported).
+        let mut pg = params(-60.0, 4.0, ExpanderMode::Upward);
+        pg.crest_gate = Some(false);
+        let (mut exp, pp) = make(pg);
+        run(&mut exp, &imp);
+        assert!(
+            (pp.expander_ratio() - 4.0).abs() < 0.01,
+            "crest driver off should keep the configured ratio, got {}",
+            pp.expander_ratio()
+        );
+        assert!(
+            pp.expander_crest() > 0.0,
+            "crest should still be reported with the driver off, got {}",
+            pp.expander_crest()
         );
     }
 }

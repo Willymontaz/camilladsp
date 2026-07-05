@@ -134,6 +134,12 @@ Commands for reading and changing settings for the websocket server.
 - `GetAdaptiveThreshold` : get the `Expander`'s current effective threshold in dB. When the
   expander runs in adaptive mode this tracks the program level; otherwise it is the fixed
   threshold. Useful for watching the adaptive threshold follow the music.
+- `GetExpanderCrest` : get the `Expander`'s last measured program crest (peak-to-RMS) in dB.
+  Low on compressed material, high on dynamic material. Use it to set `crest_floor_db` /
+  `crest_ceiling_db` against what your material actually measures.
+- `GetExpanderRatio` : get the `Expander`'s current effective (crest-driven) expansion ratio.
+  Near the configured `ratio` on compressed material, collapsing toward 1.0 (no expansion) on
+  already-dynamic material.
 - `GetStateFilePath` : get the current state file path, returns null if no state file is used.
 - `GetStateFileUpdated` : check if all changes have been saved to the state file.
 

@@ -159,6 +159,8 @@ enum WsCommand {
     ResetDeclippedSamples,
     GetExpansionGain,
     GetAdaptiveThreshold,
+    GetExpanderCrest,
+    GetExpanderRatio,
     Exit,
     Stop,
     None,
@@ -478,6 +480,14 @@ enum WsReply {
         value: f32,
     },
     GetAdaptiveThreshold {
+        result: WsResult,
+        value: f32,
+    },
+    GetExpanderCrest {
+        result: WsResult,
+        value: f32,
+    },
+    GetExpanderRatio {
         result: WsResult,
         value: f32,
     },
@@ -1693,6 +1703,20 @@ fn handle_command(
             Some(WsReply::GetAdaptiveThreshold {
                 result: WsResult::Ok,
                 value: threshold_db,
+            })
+        }
+        WsCommand::GetExpanderCrest => {
+            let crest_db = shared_data_inst.processing_params.expander_crest();
+            Some(WsReply::GetExpanderCrest {
+                result: WsResult::Ok,
+                value: crest_db,
+            })
+        }
+        WsCommand::GetExpanderRatio => {
+            let ratio = shared_data_inst.processing_params.expander_ratio();
+            Some(WsReply::GetExpanderRatio {
+                result: WsResult::Ok,
+                value: ratio,
             })
         }
         WsCommand::None => None,
