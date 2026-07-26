@@ -825,6 +825,13 @@ pub struct Devices {
     pub resampler: Option<Resampler>,
     #[serde(default)]
     pub capture_samplerate: Option<usize>,
+    /// Transient, in-memory only: the authoritative capture rate reported by the
+    /// CoreAudio rate-change listener on a follow-mode restart. Never parsed from
+    /// or written to a config file (`serde(skip)` => always `None` when loaded).
+    /// Set by the supervisor so the rebuilt capture device adopts the reported
+    /// rate instead of re-reading a possibly-stale/racy live device rate.
+    #[serde(skip)]
+    pub reported_capture_samplerate: Option<usize>,
     #[serde(default)]
     pub stop_on_rate_change: Option<bool>,
     #[serde(default)]

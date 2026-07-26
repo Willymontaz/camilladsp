@@ -213,6 +213,14 @@ fn run(
             return Ok(ExitState::Exit);
         }
     };
+    // Consume the transient reported capture rate: this run's local `active_config`
+    // keeps it (so the capture device adopts it), but clear it from the shared copy
+    // so a stale value can't leak into an unrelated later restart.
+    if active_config.devices.reported_capture_samplerate.is_some() {
+        if let Some(cfg) = shared_configs.active.lock().as_mut() {
+            cfg.devices.reported_capture_samplerate = None;
+        }
+    }
     let (tx_pb, rx_pb) = crossbeam_channel::bounded(active_config.devices.queuelimit());
     let (tx_cap, rx_cap) = crossbeam_channel::bounded(active_config.devices.queuelimit());
 
@@ -231,6 +239,12 @@ fn run(
     let conf_pb = active_config.clone();
     let conf_cap = active_config.clone();
     let conf_proc = active_config.clone();
+    // The reported capture rate has now been handed to the capture device via
+    // `conf_cap`. Clear it from the run loop's `active_config` so it can't skew
+    // later `config_diff` comparisons (which would otherwise see a phantom Devices
+    // change on an unrelated config edit) or leak into `previous`/`active` on the
+    // next restart.
+    active_config.devices.reported_capture_samplerate = None;
 
     // Processing thread
     processing::run_processing(
@@ -296,6 +310,7 @@ fn run(
                         // would stop CamillaDSP instead of restarting it.
                         let mut new_conf = active_config.clone();
                         new_conf.devices.capture_samplerate = Some(new_rate);
+                        new_conf.devices.reported_capture_samplerate = Some(new_rate);
                         debug!("Capture rate changed, restart required.");
                         if tx_command_cap.send(CommandMessage::Exit).is_err() {
                             debug!("Capture thread has already exited");
@@ -524,6 +539,7 @@ fn run(
                                 info!("Playback finished due to capture rate change, restarting at {new_rate} Hz");
                                 let mut new_conf = active_config.clone();
                                 new_conf.devices.capture_samplerate = Some(new_rate);
+                                new_conf.devices.reported_capture_samplerate = Some(new_rate);
                                 trace!("Wait for playback thread to exit..");
                                 pb_handle.join().unwrap();
                                 trace!("Wait for capture thread to exit..");
@@ -1393,6 +1409,7 @@ fn main_process() -> i32 {
                     match prev {
                         Some(mut conf) => {
                             conf.devices.capture_samplerate = Some(new_rate);
+                            conf.devices.reported_capture_samplerate = Some(new_rate);
                             *active_config.lock() = Some(conf);
                         }
                         None => {

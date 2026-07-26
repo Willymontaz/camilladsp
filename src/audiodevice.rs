@@ -455,6 +455,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
                 samplerate: conf.samplerate,
                 resampler_config: conf.resampler,
                 capture_samplerate,
+                reported_capture_samplerate: conf.reported_capture_samplerate,
                 chunksize: conf.chunksize,
                 channels: dev.channels,
                 sample_format: dev.format,
