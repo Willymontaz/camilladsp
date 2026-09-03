@@ -161,6 +161,9 @@ pub struct CoreaudioCaptureDevice {
     pub samplerate: usize,
     pub resampler_config: Option<config::Resampler>,
     pub capture_samplerate: usize,
+    /// Authoritative rate reported by the rate-change listener on a follow-mode
+    /// restart. When set, follow mode adopts this instead of re-reading the device.
+    pub reported_capture_samplerate: Option<usize>,
     pub chunksize: usize,
     pub channels: usize,
     pub sample_format: Option<CoreAudioSampleFormat>,
@@ -316,6 +319,7 @@ fn open_coreaudio_playback(
 fn open_coreaudio_capture(
     devname: &Option<String>,
     configured_samplerate: usize,
+    reported_samplerate: Option<usize>,
     follow_capture_samplerate: bool,
     channels: usize,
     sample_format: &Option<CoreAudioSampleFormat>,
@@ -343,14 +347,25 @@ fn open_coreaudio_capture(
         .map_err(|e| ConfigError::new(&format!("{e}")))?;
 
     let samplerate: usize = if follow_capture_samplerate {
-        let sr_hz: f64 = audio_unit
-            .get_property(kAudioUnitProperty_SampleRate, Scope::Output, Element::Input)
-            .map_err(|e| ConfigError::new(&format!("{e}")))?;
-        let detected = sr_hz.round() as usize;
-        info!(
-            "Following capture device sample rate, detected {detected} Hz (configured {configured_samplerate} Hz ignored)."
-        );
-        detected
+        if let Some(reported) = reported_samplerate {
+            // Restart triggered by a rate-change notification: trust the rate the
+            // listener reported rather than re-reading the live device rate, which
+            // can race the source app while the device is settling.
+            info!(
+                "Following capture device sample rate, using reported rate {reported} Hz (configured {configured_samplerate} Hz ignored)."
+            );
+            reported
+        } else {
+            // Cold start: no reported rate available, read the device's current rate.
+            let sr_hz: f64 = audio_unit
+                .get_property(kAudioUnitProperty_SampleRate, Scope::Output, Element::Input)
+                .map_err(|e| ConfigError::new(&format!("{e}")))?;
+            let detected = sr_hz.round() as usize;
+            info!(
+                "Following capture device sample rate, detected {detected} Hz (configured {configured_samplerate} Hz ignored)."
+            );
+            detected
+        }
     } else {
         configured_samplerate
     };
@@ -383,9 +398,14 @@ fn open_coreaudio_capture(
             let msg = "Failed to find matching physical capture format.";
             return Err(ConfigError::new(msg).into());
         }
-    } else {
+    } else if !follow_capture_samplerate {
         set_device_sample_rate(device_id, samplerate as f64)
             .map_err(|e| ConfigError::new(&format!("{e}")))?;
+    } else {
+        // Follow mode: adopt the device's current rate, never force it. Writing the
+        // nominal rate here is what makes CamillaDSP fight the source app (e.g. a
+        // virtual loopback like BlackHole gets pinned back to the pipeline rate).
+        debug!("Follow mode: not forcing capture device nominal rate ({samplerate} Hz adopted).");
     }
 
     debug!("Set capture stream format.");
@@ -736,6 +756,7 @@ impl CaptureDevice for CoreaudioCaptureDevice {
         let devname = self.devname.clone();
         let samplerate = self.samplerate;
         let configured_capture_samplerate = self.capture_samplerate;
+        let reported_capture_samplerate = self.reported_capture_samplerate;
         let chunksize = self.chunksize;
         let channels = self.channels;
         let sample_format = self.sample_format;
@@ -762,6 +783,7 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                 let (mut audio_unit, device_id, capture_samplerate) = match open_coreaudio_capture(
                     &devname,
                     configured_capture_samplerate,
+                    reported_capture_samplerate,
                     follow_capture_samplerate,
                     channels,
                     &sample_format,
@@ -954,7 +976,15 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                         Ok(rate) => {
                             debug!("Capture rate change event, new rate: {rate}.");
                             if rate as usize != capture_samplerate {
-                                channel.send(AudioMessage::EndOfStream).unwrap_or(());
+                                // Publish the rate change to the supervisor BEFORE
+                                // signalling EndOfStream. EndOfStream propagates
+                                // through processing -> playback and triggers
+                                // PlaybackDone, which clears active_config in the
+                                // supervisor. By landing CaptureSampleRateChanged
+                                // first we maximise the chance the supervisor turns
+                                // it into a queued ConfigChanged before
+                                // PlaybackDone is observed; the outer-loop fallback
+                                // in bin.rs recovers from the race regardless.
                                 if follow_capture_samplerate {
                                     info!("Capture device sample rate changed to {rate} Hz, scheduling pipeline restart.");
                                     ctrl_channel
@@ -963,6 +993,7 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                                 } else {
                                     status_channel.send(StatusMessage::CaptureFormatChange(rate as usize)).unwrap_or(());
                                 }
+                                channel.send(AudioMessage::EndOfStream).unwrap_or(());
                                 break;
                             }
                         },
