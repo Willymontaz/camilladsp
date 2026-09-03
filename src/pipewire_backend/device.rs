@@ -134,6 +134,7 @@ pub struct PipeWireCaptureDevice {
     pub channels: usize,
     pub silence_threshold: PrcFmt,
     pub silence_timeout: PrcFmt,
+    pub enable_rate_adjust: bool,
 }
 
 /// Build audio format POD for stream parameters
@@ -750,6 +751,7 @@ impl CaptureDevice for PipeWireCaptureDevice {
         let async_src = resampler_is_async(&resampler_config);
         let silence_timeout = self.silence_timeout;
         let silence_threshold = self.silence_threshold;
+        let enable_rate_adjust = self.enable_rate_adjust;
 
         let handle = thread::Builder::new()
             .name("PipeWireCapture".to_string())
@@ -975,13 +977,13 @@ impl CaptureDevice for PipeWireCaptureDevice {
                 };
                 debug!("Starting PipeWire capture loop");
 
-                // Initialize resampler
                 let mut resampler = new_resampler(
                     &resampler_config,
                     channels,
                     samplerate,
                     capture_samplerate,
                     chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                 );
 

@@ -1,3 +1,9 @@
+# WMO-v4 (local fork)
+Changes:
+- Skip allocation of a 1:1 resampler when `samplerate == capture_samplerate`
+  and `enable_rate_adjust=false`. The existing "Needless 1:1 sample rate
+  conversion active" warning is unchanged.
+
 # 4.1.3
 Bugfixes:
 - Increased capture ringbuffer sizes in CoreAudio, WASAPI, ASIO, and threaded ALSA

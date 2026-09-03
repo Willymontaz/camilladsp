@@ -84,6 +84,7 @@ pub struct PulseCaptureDevice {
     pub channels: usize,
     pub silence_threshold: PrcFmt,
     pub silence_timeout: PrcFmt,
+    pub enable_rate_adjust: bool,
 }
 
 /// Open a PulseAudio device
@@ -277,6 +278,7 @@ impl CaptureDevice for PulseCaptureDevice {
         let async_src = resampler_is_async(&resampler_config);
         let silence_timeout = self.silence_timeout;
         let silence_threshold = self.silence_threshold;
+        let enable_rate_adjust = self.enable_rate_adjust;
         let handle = thread::Builder::new()
             .name("PulseCapture".to_string())
             .spawn(move || {
@@ -286,6 +288,7 @@ impl CaptureDevice for PulseCaptureDevice {
                         samplerate,
                         capture_samplerate,
                         chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                     );
                 match open_pulse(

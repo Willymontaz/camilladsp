@@ -93,6 +93,7 @@ pub struct AsioCaptureDevice {
     pub stop_on_rate_change: bool,
     pub rate_measure_interval: f32,
     pub full_duplex: bool,
+    pub enable_rate_adjust: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1665,6 +1666,7 @@ impl CaptureDevice for AsioCaptureDevice {
         let stop_on_rate_change = self.stop_on_rate_change;
         let rate_measure_interval = (1000.0 * self.rate_measure_interval) as u64;
         let full_duplex = self.full_duplex;
+        let enable_rate_adjust = self.enable_rate_adjust;
 
         let handle = thread::Builder::new()
             .name("AsioCapture".to_string())
@@ -1675,6 +1677,7 @@ impl CaptureDevice for AsioCaptureDevice {
                     samplerate,
                     capture_samplerate,
                     chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                 );
 

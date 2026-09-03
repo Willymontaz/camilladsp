@@ -165,6 +165,7 @@ pub struct CoreaudioCaptureDevice {
     pub silence_timeout: PrcFmt,
     pub stop_on_rate_change: bool,
     pub rate_measure_interval: f32,
+    pub enable_rate_adjust: bool,
 }
 
 pub fn list_device_names(input: bool) -> Vec<String> {
@@ -724,6 +725,7 @@ impl CaptureDevice for CoreaudioCaptureDevice {
         let silence_timeout = self.silence_timeout;
         let silence_threshold = self.silence_threshold;
         let stop_on_rate_change = self.stop_on_rate_change;
+        let enable_rate_adjust = self.enable_rate_adjust;
         let rate_measure_interval = (1000.0 * self.rate_measure_interval) as u64;
         let blockalign = 4 * channels;
 
@@ -736,6 +738,7 @@ impl CaptureDevice for CoreaudioCaptureDevice {
                         samplerate,
                         capture_samplerate,
                         chunksize,
+                    enable_rate_adjust,
                     processing_params.clone(),
                     );
                 // Rough guess of the number of frames per callback. 
