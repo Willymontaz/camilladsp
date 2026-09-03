@@ -135,6 +135,7 @@ fn run(
     shared_configs: SharedConfigs,
     status_structs: StatusStructs,
     rx_ctrl: crossbeam_channel::Receiver<ControllerMessage>,
+    tx_ctrl: crossbeam_channel::Sender<ControllerMessage>,
 ) -> Res<ExitState> {
     let mut is_starting = true;
     let mut active_config = match shared_configs.active.lock().clone() {
@@ -194,6 +195,7 @@ fn run(
             tx_cap,
             barrier_cap,
             tx_status_cap,
+            tx_ctrl.clone(),
             rx_command_cap,
             status_structs.capture.clone(),
             status_structs.processing.clone(),
@@ -213,6 +215,16 @@ fn run(
         select! {
             recv(ctrl_ch) -> msg  => {
                 match msg {
+                    Ok(ControllerMessage::CaptureSampleRateChanged(new_rate)) => {
+                        debug!("Capture sample rate change command received, new rate: {new_rate}");
+                        let mut new_conf = active_config.clone();
+                        new_conf.devices.capture_samplerate = Some(new_rate);
+                        if let Err(e) = tx_ctrl.try_send(
+                            ControllerMessage::ConfigChanged(Box::new(new_conf)),
+                        ) {
+                            error!("Failed to schedule config change for capture rate: {e}");
+                        }
+                    },
                     Ok(ControllerMessage::ConfigChanged(new_conf)) => {
                         if !ctrl_ch.is_empty() {
                             debug!("Dropping config change command since there are more commands in the queue");
@@ -1149,7 +1161,7 @@ fn main_process() -> i32 {
                 active_config: active_config.clone(),
                 active_config_path,
                 previous_config: previous_config.clone(),
-                command_sender: tx_command,
+                command_sender: tx_command.clone(),
                 capture_status,
                 playback_status,
                 processing_params,
@@ -1217,6 +1229,9 @@ fn main_process() -> i32 {
                     debug!("Config change command received");
                     *active_config.lock() = Some(*new_conf);
                 }
+                Ok(ControllerMessage::CaptureSampleRateChanged(_)) => {
+                    debug!("Capture sample rate change command received outside of run loop, ignoring");
+                }
                 Ok(ControllerMessage::Stop) => {
                     debug!("Stop command received");
                     *active_config.lock() = None;
@@ -1238,7 +1253,12 @@ fn main_process() -> i32 {
         };
 
         debug!("Config ready, start processing");
-        let exitstatus = run(shared_configs, status_structs.clone(), rx_command.clone());
+        let exitstatus = run(
+            shared_configs,
+            status_structs.clone(),
+            rx_command.clone(),
+            tx_command.clone(),
+        );
         debug!("Processing ended with status {exitstatus:?}");
 
         match exitstatus {

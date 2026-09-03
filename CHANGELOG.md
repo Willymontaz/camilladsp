@@ -1,4 +1,10 @@
 # WMO-v4 (local fork)
+New features:
+- macOS: Optional `follow_capture_samplerate` device setting. When enabled, the
+  CoreAudio capture device adopts the actual current device sample rate at
+  startup, and the pipeline is automatically restarted with the new rate when
+  the capture device rate changes (instead of stopping with
+  `CaptureFormatChange`).
 Changes:
 - Skip allocation of a 1:1 resampler when `samplerate == capture_samplerate`
   and `enable_rate_adjust=false`. The existing "Needless 1:1 sample rate

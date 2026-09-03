@@ -828,6 +828,8 @@ pub struct Devices {
     #[serde(default)]
     pub stop_on_rate_change: Option<bool>,
     #[serde(default)]
+    pub follow_capture_samplerate: Option<bool>,
+    #[serde(default)]
     pub rate_measure_interval: Option<f32>,
     #[serde(default)]
     pub volume_ramp_time: Option<f32>,
@@ -871,6 +873,10 @@ impl Devices {
 
     pub fn stop_on_rate_change(&self) -> bool {
         self.stop_on_rate_change.unwrap_or(false)
+    }
+
+    pub fn follow_capture_samplerate(&self) -> bool {
+        self.follow_capture_samplerate.unwrap_or(false)
     }
 
     pub fn rate_adjust(&self) -> bool {

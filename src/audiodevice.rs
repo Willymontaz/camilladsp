@@ -51,6 +51,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use crate::CommandMessage;
+use crate::ControllerMessage;
 use crate::Res;
 use crate::StatusMessage;
 use crate::audiochunk::AudioChunk;
@@ -104,11 +105,13 @@ pub trait PlaybackDevice {
 
 /// A capture device
 pub trait CaptureDevice {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
         channel: crossbeam_channel::Sender<AudioMessage>,
         barrier: Arc<Barrier>,
         status_channel: crossbeam_channel::Sender<StatusMessage>,
+        ctrl_channel: crossbeam_channel::Sender<ControllerMessage>,
         command_channel: crossbeam_channel::Receiver<CommandMessage>,
         capture_status: Arc<RwLock<CaptureStatus>>,
         processing_params: Arc<ProcessingParameters>,
@@ -460,6 +463,7 @@ pub fn new_capture_device(conf: config::Devices) -> Box<dyn CaptureDevice> {
                 stop_on_rate_change: conf.stop_on_rate_change(),
                 rate_measure_interval: conf.rate_measure_interval(),
                 enable_rate_adjust: conf.rate_adjust(),
+                follow_capture_samplerate: conf.follow_capture_samplerate(),
             })
         }
         #[cfg(target_os = "windows")]

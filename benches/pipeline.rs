@@ -190,6 +190,7 @@ fn build_pipeline(chunksize: usize, multithreaded: bool, with_conv: bool) -> Pip
             resampler: None,
             capture_samplerate: None,
             stop_on_rate_change: None,
+            follow_capture_samplerate: None,
             rate_measure_interval: None,
             volume_ramp_time: None,
             volume_limit: None,
