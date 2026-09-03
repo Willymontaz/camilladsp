@@ -1,0 +1,758 @@
+<!--
+  CamillaDSP real-time processing telemetry GUI
+  ============================================================================
+  Self-contained, dependency-free local page. Open it in a browser pointed at a
+  running CamillaDSP instance:
+
+      web/telemetry.html?host=localhost&port=1234
+
+  It connects to the CamillaDSP websocket and shows, in real time:
+    - a program-level IN vs OUT volume panel fed from GetSignalLevelsSince
+      (capture_* = chain input, playback_* = post-processing output), with the
+      (out - in) delta reading out the true chain gain, and
+    - the output clipping counter (GetClippedSamples), so headroom can be dialled
+      in by eye -- e.g. verifying that a -3 dB Gain filter is enough to keep
+      resampler intersample overshoot below 0 dBFS.
+
+  Protocol: the current server speaks JSON over the websocket. A unit command is
+  a bare JSON string ("GetClippedSamples"); an argument command is a JSON object
+  ({"SetUpdateInterval":100}). Replies are keyed by command name:
+  {"GetClippedSamples":{"result":"Ok","value":0}}. Errors carry a non-"Ok"
+  result, and an unparseable command comes back as {"Invalid":{"error":...}}.
+  (This is NOT the legacy text protocol used by the stale web/camilla.html.)
+-->
+<title>CamillaDSP Telemetry</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c232d;
+    --border: #2a323d;
+    --text: #d7dee6;
+    --text-dim: #8a95a3;
+    --accent: #4aa3ff;
+    --idle: #2ec27e;
+    --active: #ffb020;
+    --alert: #ff5b5b;
+    --clip: #ff5b5b;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--text-dim); font-weight: 600; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1 1 auto; }
+
+  /* --- connection bar --- */
+  .connbar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 14px;
+  }
+  .connbar input {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 6px 9px; font: inherit; width: 130px;
+  }
+  .connbar input.port { width: 74px; }
+  .connbar label { color: var(--text-dim); font-size: 12px; }
+  button {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
+  .light { width: 11px; height: 11px; border-radius: 50%; background: var(--text-dim); box-shadow: 0 0 0 3px rgba(255,255,255,.04); }
+  .light.on { background: var(--idle); box-shadow: 0 0 8px var(--idle); }
+  .light.connecting { background: var(--active); box-shadow: 0 0 8px var(--active); }
+  .light.off { background: var(--alert); }
+  .status-txt { font-size: 12px; color: var(--text-dim); min-width: 130px; }
+  .meta { font-size: 12px; color: var(--text-dim); }
+  .meta b { color: var(--text); font-weight: 600; }
+
+  /* --- clean banner --- */
+  .banner {
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; text-align: center;
+    font-weight: 700; letter-spacing: 2px; font-size: 15px;
+    background: rgba(46,194,126,.12); color: var(--idle); border: 1px solid rgba(46,194,126,.35);
+    transition: opacity .2s;
+  }
+  .banner.dirty { background: rgba(255,176,32,.10); color: var(--active); border-color: rgba(255,176,32,.35); }
+
+  /* --- layout --- */
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+    display: flex; flex-direction: column; gap: 12px; position: relative; transition: opacity .2s;
+  }
+  .card .head { display: flex; align-items: center; justify-content: space-between; }
+  .card .title { font-size: 14px; font-weight: 600; }
+  .card .sub { font-size: 11px; color: var(--text-dim); }
+  .state {
+    font-size: 11px; font-weight: 700; letter-spacing: 1px; padding: 3px 10px; border-radius: 20px;
+    background: rgba(46,194,126,.15); color: var(--idle); border: 1px solid rgba(46,194,126,.4);
+  }
+  .state.active { background: rgba(255,176,32,.18); color: var(--active); border-color: rgba(255,176,32,.5); box-shadow: 0 0 12px rgba(255,176,32,.3); }
+
+  /* --- clipped-samples counter --- */
+  .counter { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1; transition: color .1s; }
+  .counter.blink { color: var(--alert); }
+  .counter-grid { display: flex; align-items: baseline; gap: 16px; }
+
+  /* --- canvas sparklines --- */
+  canvas { width: 100%; display: block; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--border); }
+
+  /* --- IN/OUT volume panel --- */
+  .vol-wrap { display: flex; gap: 20px; align-items: stretch; flex-wrap: wrap; }
+  .vol-meters { display: flex; gap: 26px; padding-left: 34px; position: relative; }
+  .vscale { position: absolute; left: 0; top: 0; bottom: 18px; width: 30px; }
+  .vscale span { position: absolute; right: 2px; font-family: var(--mono); font-size: 9px; color: var(--text-dim); transform: translateY(-50%); }
+  .vmeter { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .vbar-holder { position: relative; width: 46px; height: 220px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  .vbar-holder .clipzone { position: absolute; left: 0; right: 0; top: 0; background: rgba(255,91,91,.12); border-bottom: 1px dashed rgba(255,91,91,.5); }
+  .vbar { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, var(--idle), var(--active)); }
+  .vhold { position: absolute; left: 0; right: 0; height: 2px; background: #fff; }
+  .vlabel { font-size: 12px; font-weight: 700; letter-spacing: 1px; color: var(--text-dim); }
+  .vnum { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .vdelta { display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+  .vdelta .big { font-family: var(--mono); font-size: 26px; font-weight: 700; }
+  .vtimeline { flex: 1 1 320px; min-width: 260px; display: flex; flex-direction: column; gap: 6px; }
+
+  /* --- event log --- */
+  .log-head { display: flex; justify-content: space-between; align-items: center; }
+  .log { font-family: var(--mono); font-size: 12px; max-height: 220px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .log div { padding: 1px 0; white-space: nowrap; }
+  .log .ts { color: var(--text-dim); }
+  .log .tag-clip { color: var(--alert); }
+  .log .tag-conn { color: var(--text-dim); }
+  .log .empty { color: var(--text-dim); }
+  .small { font-size: 11px; color: var(--text-dim); }
+</style>
+
+<div class="row" style="margin-bottom:12px; justify-content:space-between;">
+  <h1>CamillaDSP &middot; Processing Telemetry</h1>
+  <span class="meta" id="ctx"></span>
+</div>
+
+<!-- connection bar -->
+<div class="connbar">
+  <div class="light off" id="light"></div>
+  <span class="status-txt" id="status">disconnected</span>
+  <label>host</label><input id="host" value="localhost">
+  <label>port</label><input id="port" class="port" value="1234">
+  <button class="primary" id="connectBtn">Connect</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
+  <label>window</label>
+  <select id="histWindow">
+    <option value="5">5 s</option>
+    <option value="10">10 s</option>
+    <option value="15">15 s</option>
+    <option value="30">30 s</option>
+    <option value="60">60 s</option>
+    <option value="120">120 s</option>
+  </select>
+  <span class="grow"></span>
+  <span class="meta" id="connMeta"></span>
+</div>
+
+<!-- clean / dirty banner -->
+<div class="banner" id="banner">CLEAN &middot; no clipping</div>
+
+<!-- IN / OUT volume panel -->
+<div class="panel">
+  <h2>Program volume &middot; IN vs OUT</h2>
+  <div class="vol-wrap">
+    <div class="vol-meters">
+      <div class="vscale" id="vscale"></div>
+      <div class="vmeter">
+        <div class="vbar-holder"><div class="clipzone" id="clipIn"></div><div class="vbar" id="barIn"></div><div class="vhold" id="holdIn"></div></div>
+        <div class="vlabel">IN</div>
+        <div class="vnum" id="numIn">--.- dB</div>
+      </div>
+      <div class="vmeter">
+        <div class="vbar-holder"><div class="clipzone" id="clipOut"></div><div class="vbar" id="barOut"></div><div class="vhold" id="holdOut"></div></div>
+        <div class="vlabel">OUT</div>
+        <div class="vnum" id="numOut">--.- dB</div>
+      </div>
+      <div class="vdelta">
+        <div class="small">&Delta; (out &minus; in)</div>
+        <div class="big" id="delta">-- dB</div>
+        <div class="small" id="deltaHint"></div>
+      </div>
+    </div>
+    <div class="vtimeline">
+      <div class="small">IN / OUT RMS &mdash; last <span id="histSpan">60</span>s</div>
+      <canvas id="volSpark" height="120"></canvas>
+      <div class="small"><span style="color:var(--accent)">&#9632; IN</span> &nbsp; <span style="color:var(--active)">&#9632; OUT</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- clipped-samples card -->
+<div class="cards" id="cards"></div>
+
+<!-- event log -->
+<div class="panel">
+  <div class="log-head">
+    <h2 style="margin:0">Event log</h2>
+    <div class="row">
+      <span class="small" id="logCount">0 events</span>
+      <button id="clearLog">Clear</button>
+      <button id="exportLog">Export CSV</button>
+    </div>
+  </div>
+  <div class="log" id="log"><div class="empty">No events yet.</div></div>
+</div>
+
+<script>
+"use strict";
+// ============================================================================
+// Tunable constants (kept in-code per the plan; no build step / config file)
+// ============================================================================
+const CFG = {
+  pollIntervalMs: 80,        // client poll cadence; server refresh set to match
+  serverUpdateMs: 80,        // SetUpdateInterval sent on connect
+  historySeconds: 60,        // rolling sparkline / timeline window
+  activeLatchMs: 1500,       // how long an ACTIVE state stays latched after an event
+  channelReduce: "max",      // "max" | "mean" -- how per-channel arrays collapse
+  // Fixed RMS integration window for the IN/OUT meters. Using a windowed RMS
+  // (GetSignalLevelsSince) instead of the last single chunk does two things:
+  //  - stabilises the reading (a permanent averaging window, not a jumpy
+  //    ~chunk-sized value), and
+  //  - because the window (hundreds of ms) is far longer than the capture->
+  //    playback latency (device buffering + any plugin look-ahead, tens of ms),
+  //    it makes that IN/OUT time-offset negligible so the levels line up and the
+  //    (out - in) delta settles to the true chain gain.
+  levelWindowSec: 0.4,
+  volScale: { min: -60, max: 0 },   // dBFS meter range for IN/OUT
+  clipZoneDb: -1,            // headroom/clip zone starts here on the volume meter
+  peakHoldDecayDbPerSec: 12, // peak-hold marker decay rate (all meters)
+  logMax: 800,               // bounded event log length
+  reconnect: { baseMs: 500, maxMs: 8000 }, // auto-reconnect backoff
+};
+
+// ---------- URL params & connection bar prefill ----------
+// Prefer values injected by CamillaDSP's --telemetry launcher (window.CDSP_PARAMS),
+// which is robust even when a browser drops the query string from a file:// URL.
+// Fall back to ?host=/?port= for manually-opened pages, then to defaults.
+const params = new URLSearchParams(location.search);
+const injected = window.CDSP_PARAMS || {};
+const hostEl = document.getElementById("host");
+const portEl = document.getElementById("port");
+hostEl.value = injected.host || params.get("host") || "localhost";
+portEl.value = injected.port || params.get("port") || "1234";
+document.getElementById("histSpan").textContent = CFG.historySeconds;
+
+// Time-window selector: mutate CFG.historySeconds live. pushHistory's trim and
+// the sparkline x-axis (timeX) both read it, so every chart + the IN/OUT
+// timeline re-scale on the next render -- no per-chart work needed.
+const histWindowEl = document.getElementById("histWindow");
+histWindowEl.value = String(CFG.historySeconds);
+histWindowEl.addEventListener("change", () => {
+  CFG.historySeconds = Number(histWindowEl.value);
+  document.getElementById("histSpan").textContent = CFG.historySeconds;
+});
+
+// ============================================================================
+// Metric state
+// ============================================================================
+function newHistory() { return []; }  // array of {t, v}
+const now = () => performance.now();
+
+// clock offset so we can timestamp log lines with wall-clock time while using
+// performance.now() (monotonic) internally.
+const clockBase = { perf: now(), wall: Date.now() };
+function wallTime(perfTs) { return new Date(clockBase.wall + (perfTs - clockBase.perf)); }
+
+// Output clipping counter. Fed by the upstream GetClippedSamples command, which
+// counts samples the playback device had to clamp -- i.e. the signal exceeded
+// 0 dBFS somewhere in the chain (resampler intersample overshoot, gain, EQ).
+const clipCard = {
+  title: "Output clipping", sub: "samples clamped at 0 dBFS",
+  count: 0, prevCount: null, rate: 0, lastCountTs: null,
+  lastActiveTs: -1e9, lastBlinkTs: -1e9, history: newHistory(),
+};
+
+// IN / OUT volume state (fed from GetSignalLevelsSince -- windowed RMS)
+const vol = {
+  in:  { rms: -100, peak: -100, peakHold: CFG.volScale.min, history: newHistory() },
+  out: { rms: -100, peak: -100, peakHold: CFG.volScale.min, history: newHistory() },
+};
+
+const eventLog = [];  // {tsWall, tag, text}
+
+// ============================================================================
+// Websocket + protocol layer
+// ============================================================================
+let socket = null;
+let connected = false;
+let wantConnected = false;      // user intent (drives auto-reconnect)
+let reconnectDelay = CFG.reconnect.baseMs;
+let reconnectTimer = null;
+let pollTimer = null;
+
+function reduceChannels(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return CFG.volScale.min;
+  if (CFG.channelReduce === "mean") {
+    // mean in the linear domain would be more correct, but these values are
+    // already dB summaries per channel; a simple mean is fine for a monitor.
+    return arr.reduce((a, b) => a + b, 0) / arr.length;
+  }
+  return Math.max(...arr);
+}
+
+function setStatus(text, cls) {
+  document.getElementById("status").textContent = text;
+  const light = document.getElementById("light");
+  light.className = "light " + (cls || "");
+}
+
+function connect() {
+  const host = hostEl.value.trim() || "localhost";
+  const port = portEl.value.trim() || "1234";
+  wantConnected = true;
+  clearTimeout(reconnectTimer);
+  try {
+    setStatus("connecting to " + host + ":" + port + " ...", "connecting");
+    socket = new WebSocket("ws://" + host + ":" + port);
+  } catch (err) {
+    setStatus("bad address: " + err.message, "off");
+    scheduleReconnect();
+    return;
+  }
+  socket.onopen = onOpen;
+  socket.onclose = onClose;
+  socket.onerror = () => { /* onclose will follow */ };
+  socket.onmessage = onMessage;
+}
+
+function disconnect() {
+  wantConnected = false;
+  clearTimeout(reconnectTimer);
+  stopPolling();
+  if (socket) { try { socket.close(); } catch (e) {} }
+}
+
+function scheduleReconnect() {
+  if (!wantConnected) return;
+  setStatus("disconnected — retrying in " + Math.round(reconnectDelay / 100) / 10 + "s", "off");
+  reconnectTimer = setTimeout(() => {
+    reconnectDelay = Math.min(reconnectDelay * 2, CFG.reconnect.maxMs);
+    connect();
+  }, reconnectDelay);
+}
+
+function onOpen() {
+  connected = true;
+  reconnectDelay = CFG.reconnect.baseMs;
+  setStatus("connected", "on");
+  document.getElementById("connectBtn").disabled = true;
+  document.getElementById("disconnectBtn").disabled = false;
+  logEvent("conn", "connected to " + hostEl.value + ":" + portEl.value);
+
+  // Align the server's metering refresh to our poll cadence, then start polling.
+  send({ SetUpdateInterval: CFG.serverUpdateMs });
+  // one-off context queries
+  send("GetVersion");
+  send("GetConfigTitle");
+  startPolling();
+}
+
+function onClose() {
+  connected = false;
+  stopPolling();
+  document.getElementById("connectBtn").disabled = false;
+  document.getElementById("disconnectBtn").disabled = true;
+  if (wantConnected) {
+    logEvent("conn", "connection lost");
+    scheduleReconnect();
+  } else {
+    setStatus("disconnected", "off");
+    logEvent("conn", "disconnected");
+  }
+}
+
+function send(cmd) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  // unit command = bare JSON string; argument command = JSON object
+  socket.send(JSON.stringify(cmd));
+}
+
+function startPolling() {
+  stopPolling();
+  poll();
+  pollTimer = setInterval(poll, CFG.pollIntervalMs);
+}
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+function poll() {
+  // Windowed RMS (see CFG.levelWindowSec): stable + time-offset-tolerant.
+  send({ GetSignalLevelsSince: CFG.levelWindowSec });
+  send("GetClippedSamples");
+  send("GetProcessingLoad");
+  send("GetState");
+}
+
+// ---- reply dispatch (replies are keyed by command name) ----
+const dispatch = {
+  GetSignalLevelsSince(v) {
+    const t = now();
+    vol.in.rms   = reduceChannels(v.capture_rms);
+    vol.in.peak  = reduceChannels(v.capture_peak);
+    vol.out.rms  = reduceChannels(v.playback_rms);
+    vol.out.peak = reduceChannels(v.playback_peak);
+    // feed peak into peak-hold (rise instantly, decay in render loop)
+    if (vol.in.peak  > vol.in.peakHold)  vol.in.peakHold  = vol.in.peak;
+    if (vol.out.peak > vol.out.peakHold) vol.out.peakHold = vol.out.peak;
+    pushHistory(vol.in.history,  t, vol.in.rms);
+    pushHistory(vol.out.history, t, vol.out.rms);
+  },
+  GetClippedSamples(v) { updateClip(v); },
+  GetProcessingLoad(v) { ctx.load = v; },
+  GetState(v)          { ctx.state = v; },
+  GetVersion(v)        { ctx.version = v; },
+  GetConfigTitle(v)    { ctx.title = v; },
+  SetUpdateInterval() {},
+  ResetClippedSamples() {},
+};
+
+const ctx = { version: null, title: null, load: null, state: null };
+
+function onMessage(ev) {
+  let reply;
+  try { reply = JSON.parse(ev.data); } catch (e) { return; }
+  const entry = Object.entries(reply)[0];
+  if (!entry) return;
+  const [key, body] = entry;
+  if (key === "Invalid") return;  // unparseable command; can't attribute -> ignore
+  if (!body || body.result !== "Ok") return;
+  const fn = dispatch[key];
+  if (fn) fn(body.value);
+}
+
+// ============================================================================
+// Metric updates
+// ============================================================================
+function updateClip(count) {
+  const c = clipCard;
+  const t = now();
+  if (c.prevCount !== null && c.lastCountTs !== null) {
+    const dt = (t - c.lastCountTs) / 1000;
+    const dCount = count - c.prevCount;
+    if (dt > 0) c.rate = dCount / dt;
+    if (dCount > 0) {
+      c.lastActiveTs = t;
+      c.lastBlinkTs = t;
+      logEvent("clip", "Clipped +" + dCount + " sample" + (dCount === 1 ? "" : "s") +
+               " (total " + count + ")");
+    } else if (t - c.lastCountTs > 300) {
+      // decay the displayed rate toward zero when no new clips arrive
+      c.rate *= 0.5;
+    }
+  }
+  c.prevCount = count;
+  c.count = count;
+  c.lastCountTs = t;
+  pushHistory(c.history, t, count);
+}
+
+function pushHistory(arr, t, v) {
+  arr.push({ t, v });
+  const cutoff = t - CFG.historySeconds * 1000;
+  while (arr.length && arr[0].t < cutoff) arr.shift();
+}
+
+// ============================================================================
+// Event log
+// ============================================================================
+function logEvent(tag, text) {
+  const tsWall = wallTime(now());
+  eventLog.unshift({ tsWall, tag, text });
+  if (eventLog.length > CFG.logMax) eventLog.length = CFG.logMax;
+  renderLog();
+}
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+function fmtClock(d) { return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds()); }
+
+function renderLog() {
+  const el = document.getElementById("log");
+  document.getElementById("logCount").textContent = eventLog.length + " event" + (eventLog.length === 1 ? "" : "s");
+  if (eventLog.length === 0) { el.innerHTML = '<div class="empty">No events yet.</div>'; return; }
+  const frag = document.createDocumentFragment();
+  for (const e of eventLog) {
+    const d = document.createElement("div");
+    d.innerHTML = '<span class="ts">' + fmtClock(e.tsWall) + '</span>  ' +
+                  '<span class="tag-' + e.tag + '">' + escapeHtml(e.text) + '</span>';
+    frag.appendChild(d);
+  }
+  el.innerHTML = "";
+  el.appendChild(frag);
+}
+
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+document.getElementById("clearLog").onclick = () => { eventLog.length = 0; renderLog(); };
+document.getElementById("exportLog").onclick = () => {
+  const rows = [["timestamp", "tag", "event"]];
+  for (const e of eventLog) rows.push([e.tsWall.toISOString(), e.tag, e.text]);
+  const csv = rows.map(r => r.map(f => '"' + String(f).replace(/"/g, '""') + '"').join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "camilladsp-telemetry-" + Date.now() + ".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+// ============================================================================
+// Formatting helpers
+// ============================================================================
+function fmtDb(v) { return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + " dB"; }
+function fmtDbFs(v) {
+  if (!isFinite(v) || v <= CFG.volScale.min) return "−∞ dB";
+  return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + " dB";
+}
+
+// ============================================================================
+// Build the clipping card in the DOM
+// ============================================================================
+function buildClipCard() {
+  const root = document.createElement("div");
+  root.className = "card";
+  root.innerHTML = `
+    <div class="head">
+      <div>
+        <div class="title">${clipCard.title}</div>
+        <div class="sub">${clipCard.sub}</div>
+      </div>
+      <div class="state">CLEAN</div>
+    </div>
+    <div class="body">
+      <div class="counter-grid">
+        <div><div class="counter">0</div><div class="small">samples clipped</div></div>
+        <div><div class="vnum"><b class="rate">0.0</b> /s</div><div class="small">clip rate</div></div>
+        <div style="margin-left:auto"><button class="reset">Reset</button></div>
+      </div>
+    </div>
+    <canvas height="60"></canvas>
+  `;
+  clipCard.el = {
+    state: root.querySelector(".state"),
+    canvas: root.querySelector("canvas"),
+    counter: root.querySelector(".counter"),
+    rate: root.querySelector(".rate"),
+  };
+  root.querySelector(".reset").onclick = () => {
+    send("ResetClippedSamples");
+    clipCard.count = 0; clipCard.prevCount = 0; clipCard.rate = 0;
+    logEvent("clip", "counter reset");
+  };
+  document.getElementById("cards").appendChild(root);
+}
+
+// vertical dBFS scale ticks for the IN/OUT meters
+function buildVolScale() {
+  const el = document.getElementById("vscale");
+  const { min, max } = CFG.volScale;
+  const step = 12;
+  for (let db = max; db >= min; db -= step) {
+    const s = document.createElement("span");
+    s.textContent = db;
+    s.style.top = dbToPct(db) + "%";
+    el.appendChild(s);
+  }
+  // clip zone shading on both meters
+  const zoneH = ((max - CFG.clipZoneDb) / (max - min)) * 100;
+  document.getElementById("clipIn").style.height = zoneH + "%";
+  document.getElementById("clipOut").style.height = zoneH + "%";
+}
+function dbToPct(db) {  // 0% = top(max dB), 100% = bottom(min dB)
+  const { min, max } = CFG.volScale;
+  return (1 - (db - min) / (max - min)) * 100;
+}
+function dbToHeightPct(db) {  // fraction of bar filled from the bottom
+  const { min, max } = CFG.volScale;
+  return Math.max(0, Math.min(1, (db - min) / (max - min))) * 100;
+}
+
+// ============================================================================
+// Render loop (rAF) -- decays peak-holds, draws meters & sparklines
+// ============================================================================
+let lastFrame = now();
+function render() {
+  const t = now();
+  const dt = (t - lastFrame) / 1000;
+  lastFrame = t;
+  const decay = CFG.peakHoldDecayDbPerSec * dt;
+
+  // ---- IN/OUT volume meters ----
+  renderVolMeter("In", vol.in, decay);
+  renderVolMeter("Out", vol.out, decay);
+  const delta = vol.out.rms - vol.in.rms;
+  const deltaEl = document.getElementById("delta");
+  if (isFinite(delta) && vol.in.rms > CFG.volScale.min && vol.out.rms > CFG.volScale.min) {
+    deltaEl.textContent = fmtDb(delta);
+    deltaEl.style.color = delta > 0.3 ? "var(--idle)" : delta < -0.3 ? "var(--accent)" : "var(--text)";
+    document.getElementById("deltaHint").textContent =
+      delta > 0.3 ? "chain adds level" : delta < -0.3 ? "chain reduces level" : "unity";
+  } else {
+    deltaEl.textContent = "-- dB"; deltaEl.style.color = "var(--text)";
+    document.getElementById("deltaHint").textContent = "";
+  }
+  drawVolSpark();
+
+  // ---- clipping card ----
+  const clipping = (t - clipCard.lastActiveTs) < CFG.activeLatchMs;
+  clipCard.el.state.textContent = clipping ? "CLIPPING" : "CLEAN";
+  clipCard.el.state.className = "state" + (clipping ? " active" : "");
+  clipCard.el.counter.textContent = clipCard.count;
+  clipCard.el.counter.classList.toggle("blink", (t - clipCard.lastBlinkTs) < 150);
+  // decay rate display when idle
+  if (clipCard.lastCountTs && (t - clipCard.lastCountTs) > 500) {
+    clipCard.rate *= (1 - Math.min(1, dt * 2));
+  }
+  clipCard.el.rate.textContent = clipCard.rate.toFixed(1);
+  drawSparkCounter(clipCard);
+
+  // ---- CLEAN banner ----
+  const banner = document.getElementById("banner");
+  if (!connected) {
+    banner.textContent = "\u2014 not connected \u2014";
+    banner.className = "banner"; banner.style.opacity = ".5";
+  } else if (!clipping) {
+    banner.textContent = "CLEAN \u00b7 no clipping";
+    banner.className = "banner"; banner.style.opacity = "1";
+  } else {
+    banner.textContent = "CLIPPING \u00b7 output exceeds 0 dBFS";
+    banner.className = "banner dirty"; banner.style.opacity = "1";
+  }
+
+  // ---- context line ----
+  const parts = [];
+  if (ctx.title) parts.push("<b>" + escapeHtml(ctx.title) + "</b>");
+  if (ctx.state) parts.push(escapeHtml(String(ctx.state)));
+  if (ctx.load != null) parts.push("load " + (ctx.load * 100).toFixed(0) + "%");
+  if (ctx.version) parts.push("v" + escapeHtml(ctx.version));
+  document.getElementById("ctx").innerHTML = parts.join(" &middot; ");
+
+  requestAnimationFrame(render);
+}
+
+function renderVolMeter(suffix, m, decay) {
+  m.peakHold = Math.max(m.rms, m.peakHold - decay);
+  document.getElementById("bar" + suffix).style.height = dbToHeightPct(m.rms) + "%";
+  document.getElementById("hold" + suffix).style.bottom = dbToHeightPct(m.peakHold) + "%";
+  // colour the bar red once inside the clip zone
+  const bar = document.getElementById("bar" + suffix);
+  bar.style.background = m.rms > CFG.clipZoneDb
+    ? "linear-gradient(0deg, var(--active), var(--clip))"
+    : "linear-gradient(0deg, var(--idle), var(--active))";
+  document.getElementById("num" + suffix).textContent = fmtDbFs(m.rms);
+}
+
+// ---------- canvas drawing ----------
+function fitCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  // Logical height: capture the intended CSS height ONCE from the initial
+  // `height` attribute and pin it via style. Deriving it from clientHeight is a
+  // trap -- there is no CSS height, so writing the backing-store `height`
+  // attribute changes the rendered height, which feeds back into clientHeight
+  // on HiDPI (dpr>1) and makes the canvas grow every frame (the "zoom").
+  if (canvas.__cssH === undefined) {
+    canvas.__cssH = canvas.height || canvas.clientHeight || 60;
+    canvas.style.height = canvas.__cssH + "px";
+  }
+  const w = canvas.clientWidth;   // width is pinned by CSS (width:100%)
+  const h = canvas.__cssH;
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+  const ctx2 = canvas.getContext("2d");
+  ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx: ctx2, w, h };
+}
+
+function timeX(t, tNow, w) {
+  const span = CFG.historySeconds * 1000;
+  return w * (1 - (tNow - t) / span);
+}
+
+function drawSparkCounter(card) {
+  const { ctx: c, w, h } = fitCanvas(card.el.canvas);
+  const tNow = now();
+  c.clearRect(0, 0, w, h);
+  const hist = card.history;
+  if (hist.length < 2) return;
+  // draw per-interval increments as bars so bursts are visible
+  let maxInc = 1;
+  const incs = [];
+  for (let i = 1; i < hist.length; i++) {
+    const inc = Math.max(0, hist[i].v - hist[i - 1].v);
+    incs.push({ t: hist[i].t, inc });
+    if (inc > maxInc) maxInc = inc;
+  }
+  c.fillStyle = "#ff5b5b";
+  for (const p of incs) {
+    if (p.inc <= 0) continue;
+    const x = timeX(p.t, tNow, w);
+    const bh = (p.inc / maxInc) * (h - 4);
+    c.fillRect(x - 1, h - bh, 2, bh);
+  }
+}
+
+function drawVolSpark() {
+  const canvas = document.getElementById("volSpark");
+  const { ctx: c, w, h } = fitCanvas(canvas);
+  const tNow = now();
+  c.clearRect(0, 0, w, h);
+  const { min, max } = CFG.volScale;
+  const yOf = v => (1 - (Math.max(min, Math.min(max, v)) - min) / (max - min)) * h;
+  // grid lines every 12 dB
+  c.strokeStyle = "rgba(255,255,255,.06)"; c.lineWidth = 1;
+  for (let db = max; db >= min; db -= 12) {
+    const y = yOf(db);
+    c.beginPath(); c.moveTo(0, y); c.lineTo(w, y); c.stroke();
+  }
+  const drawTrace = (hist, color) => {
+    if (hist.length < 2) return;
+    c.beginPath(); c.strokeStyle = color; c.lineWidth = 1.5;
+    let started = false;
+    for (const p of hist) {
+      if (p.v <= min) { started = false; continue; }  // gap on silence
+      const x = timeX(p.t, tNow, w);
+      const y = yOf(p.v);
+      started ? c.lineTo(x, y) : c.moveTo(x, y);
+      started = true;
+    }
+    c.stroke();
+  };
+  drawTrace(vol.in.history, "#4aa3ff");
+  drawTrace(vol.out.history, "#ffb020");
+}
+
+// ============================================================================
+// Boot
+// ============================================================================
+document.getElementById("connectBtn").onclick = connect;
+document.getElementById("disconnectBtn").onclick = disconnect;
+[hostEl, portEl].forEach(el => el.addEventListener("keydown", e => { if (e.key === "Enter") connect(); }));
+
+buildClipCard();
+buildVolScale();
+renderLog();
+requestAnimationFrame(render);
+
+// Auto-connect on load using the prefilled/URL values.
+connect();
+</script>

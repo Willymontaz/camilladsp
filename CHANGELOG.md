@@ -1,10 +1,19 @@
 # WMO-v4 (local fork)
 New features:
+- New `Polyphase` resampler: an upsample-only, linear-phase long-tap polyphase
+  FIR engine. The branch count is derived from the exact rational ratio between
+  the rates, so every output sample lands on a branch, and the stopband edge is
+  placed at the source Nyquist. NEON-vectorised on AArch64. See `bench/bench.py`
+  and `exampleconfigs/audiophile_resample.yml`.
 - macOS: Optional `follow_capture_samplerate` device setting. When enabled, the
   CoreAudio capture device adopts the actual current device sample rate at
   startup, and the pipeline is automatically restarted with the new rate when
   the capture device rate changes (instead of stopping with
   `CaptureFormatChange`).
+- New `--telemetry` flag, which opens a self-contained real-time monitoring GUI
+  (`web/telemetry.html`) in the default browser: windowed IN/OUT RMS meters with
+  the chain-gain delta, a scrolling level timeline, the output clipping counter
+  and an event log with CSV export.
 Changes:
 - Skip allocation of a 1:1 resampler when `samplerate == capture_samplerate`
   and `enable_rate_adjust=false`. The existing "Needless 1:1 sample rate
