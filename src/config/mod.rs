@@ -967,6 +967,24 @@ pub enum Resampler {
     },
     AsyncSinc(AsyncSincParameters),
     Synchronous,
+    /// Audiophile-grade linear-phase polyphase FIR upsampler.
+    ///
+    /// Upsampling only: the capture rate must be strictly below the playback
+    /// rate. The number of polyphase branches is derived from the exact
+    /// rational ratio (`playback_rate / gcd(rates)`, so 320 for
+    /// 44.1 kHz -> 96 kHz), and the ratio is fixed at construction; use
+    /// `AsyncSinc` if `rate_adjust: true` is required.
+    ///
+    /// `taps` is the per-branch tap count, so the prototype lowpass is
+    /// `taps * branches` long.
+    Polyphase {
+        #[serde(default = "default_polyphase_taps")]
+        taps: usize,
+    },
+}
+
+fn default_polyphase_taps() -> usize {
+    8192
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

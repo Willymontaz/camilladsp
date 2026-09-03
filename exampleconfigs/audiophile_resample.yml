@@ -1,0 +1,36 @@
+---
+# Audiophile linear-phase polyphase FIR upsampler example.
+#
+# Polyphase is an upsample-only, fixed-ratio engine: capture_samplerate must be
+# strictly below samplerate, and the ratio is locked at construction. It does
+# NOT support `rate_adjust: true` (loopback / clock correction); use AsyncSinc
+# for that. If you switch capture samplerate via `follow_capture_samplerate`,
+# the engine is rebuilt at the new rate.
+#
+# The only parameter is `taps`, the per-branch tap count. The polyphase branch
+# count is derived from the exact rational ratio between the rates
+# (samplerate / gcd(rates), so 320 for 44.1 kHz -> 96 kHz), which means every
+# output sample lands exactly on a branch.
+#
+# taps: 8192 gives a passband flat to ~22.0 kHz for 44.1 kHz -> 96 kHz, with
+# the 140 dB stopband reached at the 22.05 kHz source Nyquist. Lower values
+# cost less CPU but roll off the top octave earlier: ~20.3 kHz at taps: 256.
+#
+devices:
+  samplerate: 96000
+  chunksize: 1024
+  capture_samplerate: 44100
+  enable_rate_adjust: false
+  resampler:
+    type: Polyphase
+    taps: 8192
+  capture:
+    type: RawFile
+    filename: "dummy"
+    channels: 2
+    format: S16_LE
+  playback:
+    type: File
+    filename: "dummy"
+    channels: 2
+    format: S16_LE

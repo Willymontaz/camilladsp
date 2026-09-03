@@ -1,3 +1,5 @@
+pub mod polyphase;
+
 use crate::PrcFmt;
 use crate::ProcessingParameters;
 use crate::audiochunk::AudioChunk;
@@ -6,6 +8,7 @@ use crate::utils::stash::{container_from_stash, recycle_container, vec_from_stas
 use audioadapter_buffers::direct::{
     InterleavedSlice, SequentialSliceOfVecs, SparseSequentialSliceOfVecs,
 };
+use polyphase::PolyphaseFir;
 use rubato::{
     Async, Fft, FixedAsync, FixedSync, Indexing, PolynomialDegree, Resampler,
     SincInterpolationParameters, SincInterpolationType, WindowFunction, calculate_cutoff,
@@ -28,6 +31,14 @@ pub fn resampler_is_async(conf: &Option<config::Resampler>) -> bool {
         &conf,
         Some(config::Resampler::AsyncSinc { .. }) | Some(config::Resampler::AsyncPoly { .. })
     )
+}
+
+/// Returns true if the resampler config can support `rate_adjust: true`.
+/// The new `Polyphase` engine has a fixed-at-construction ratio and explicitly
+/// opts out (see [`PolyphaseFir::set_resample_ratio`]); use `AsyncSinc` for
+/// streamer setups that need clock-drift tracking.
+pub fn resampler_supports_rate_adjust(conf: &Option<config::Resampler>) -> bool {
+    !matches!(conf, Some(config::Resampler::Polyphase { .. }))
 }
 
 pub fn new_async_sinc_parameters(
@@ -206,24 +217,67 @@ pub fn new_resampler(
             })
         }
         Some(config::Resampler::Synchronous) => Some(ChunkResampler {
-            resampler: Box::new(
-                Fft::<PrcFmt>::new(
-                    capture_samplerate,
-                    samplerate,
-                    chunksize,
-                    2,
-                    num_channels,
-                    FixedSync::Output,
-                )
-                .unwrap(),
-            ),
+            resampler: new_fft_resampler(capture_samplerate, samplerate, chunksize, num_channels),
             indexing,
             secs_per_chunk,
             overloaded_chunks: 0,
             processing_params: processing_params.clone(),
         }),
+        Some(config::Resampler::Polyphase { taps }) => {
+            let resampler: Box<dyn Resampler<PrcFmt>> = match PolyphaseFir::new(
+                capture_samplerate,
+                samplerate,
+                chunksize,
+                num_channels,
+                *taps,
+            ) {
+                Ok(poly) => {
+                    debug!(
+                        "Creating Polyphase resampler: {capture_samplerate} -> {samplerate} Hz, taps={taps}"
+                    );
+                    Box::new(poly)
+                }
+                Err(err) => {
+                    // Only reachable when `follow_capture_samplerate` switches to
+                    // a rate the config validator never saw, so fall back rather
+                    // than taking the stream down.
+                    warn!(
+                        "Polyphase resampler cannot handle {capture_samplerate} -> {samplerate} Hz ({err}), falling back to Synchronous"
+                    );
+                    new_fft_resampler(capture_samplerate, samplerate, chunksize, num_channels)
+                }
+            };
+            Some(ChunkResampler {
+                resampler,
+                indexing,
+                secs_per_chunk,
+                overloaded_chunks: 0,
+                processing_params: processing_params.clone(),
+            })
+        }
         None => None,
     }
+}
+
+/// The `Synchronous` resampler, also used as the Polyphase fallback when the
+/// capture rate turns out to be unsupported at runtime.
+fn new_fft_resampler(
+    capture_samplerate: usize,
+    samplerate: usize,
+    chunksize: usize,
+    num_channels: usize,
+) -> Box<dyn Resampler<PrcFmt>> {
+    Box::new(
+        Fft::<PrcFmt>::new(
+            capture_samplerate,
+            samplerate,
+            chunksize,
+            2,
+            num_channels,
+            FixedSync::Output,
+        )
+        .unwrap(),
+    )
 }
 
 impl ChunkResampler {

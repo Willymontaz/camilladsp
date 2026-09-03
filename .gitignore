@@ -1,3 +1,5 @@
+.claude
+.idea
 /target
 **/*.rs.bk
 Cargo.lock
@@ -10,4 +12,5 @@ configs/
 coeffs/
 .venv
 *.csv
+logs/
 *.exe

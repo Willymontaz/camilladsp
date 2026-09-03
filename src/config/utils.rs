@@ -20,6 +20,7 @@ use crate::mixer;
 use crate::processors::compressor;
 use crate::processors::noisegate;
 use crate::processors::race;
+use crate::utils::resampling::polyphase;
 use crate::utils::wavtools::find_data_in_wav_stream;
 use parking_lot::RwLock;
 use serde::{Deserialize, de};
@@ -546,6 +547,37 @@ pub fn validate_config(conf: &mut Configuration, filename: Option<&str>) -> Res<
     if conf.devices.volume_limit() < -150.0 {
         return Err(ConfigError::new("Volume limit cannot be less than -150 dB").into());
     }
+    if let Some(Resampler::Polyphase { taps }) = &conf.devices.resampler {
+        if conf.devices.rate_adjust() {
+            return Err(ConfigError::new(
+                "The Polyphase resampler has a fixed ratio and does not support \
+                 rate_adjust. Use the AsyncSinc resampler if rate_adjust is required, \
+                 or rely on follow_capture_samplerate which rebuilds the engine on rate changes.",
+            )
+            .into());
+        }
+        if *taps == 0 {
+            return Err(
+                ConfigError::new("Polyphase resampler taps must be greater than zero").into(),
+            );
+        }
+        // Same derivation as the engine, so validation and construction cannot
+        // disagree. This rejects downsampling and ratios that would need an
+        // unreasonable number of polyphase branches. Equal rates are allowed:
+        // new_resampler() bypasses the resampler entirely in that case, so
+        // the engine is never built.
+        if conf.devices.capture_samplerate() != conf.devices.samplerate
+            && let Err(err) = polyphase::derived_oversampling(
+                conf.devices.capture_samplerate(),
+                conf.devices.samplerate,
+            )
+        {
+            return Err(ConfigError::new(&format!(
+                "Invalid rates for the Polyphase resampler: {err}"
+            ))
+            .into());
+        }
+    }
     #[cfg(target_os = "windows")]
     if let CaptureDevice::Wasapi(dev) = &conf.devices.capture
         && let Some(format) = dev.format
@@ -834,5 +866,81 @@ pub fn playback_channel_labels(config: &Option<Configuration>) -> Option<Vec<Opt
         conf.devices.capture.labels()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn polyphase_config_yaml(rate_adjust: bool) -> String {
+        format!(
+            r#"---
+devices:
+  samplerate: 96000
+  chunksize: 1024
+  enable_rate_adjust: {rate_adjust}
+  resampler:
+    type: Polyphase
+    taps: 64
+  capture_samplerate: 44100
+  capture:
+    type: Stdin
+    channels: 2
+    format: S32_LE
+  playback:
+    type: Stdout
+    channels: 2
+    format: S32_LE
+"#
+        )
+    }
+
+    #[test]
+    fn polyphase_rejects_rate_adjust_combo() {
+        let yaml = polyphase_config_yaml(true);
+        let mut conf: Configuration = yaml_serde::from_str(&yaml).unwrap();
+        let result = validate_config(&mut conf, None);
+        let err = result.expect_err("validation should reject Polyphase + rate_adjust");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Polyphase") && msg.contains("rate_adjust"),
+            "error message should mention both: {msg}"
+        );
+    }
+
+    #[test]
+    fn polyphase_rejects_downsampling() {
+        let yaml = polyphase_config_yaml(false).replace(
+            "  capture_samplerate: 44100",
+            "  capture_samplerate: 192000",
+        );
+        let mut conf: Configuration = yaml_serde::from_str(&yaml).unwrap();
+        let err = validate_config(&mut conf, None)
+            .expect_err("validation should reject a downsampling Polyphase config");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("only upsamples"),
+            "error message should explain the restriction: {msg}"
+        );
+    }
+
+    #[test]
+    fn polyphase_with_equal_rates_validates() {
+        // 1:1 is bypassed by new_resampler(), so it must not be rejected.
+        let yaml = polyphase_config_yaml(false).replace(
+            "  capture_samplerate: 44100",
+            "  capture_samplerate: 96000",
+        );
+        let mut conf: Configuration = yaml_serde::from_str(&yaml).unwrap();
+        validate_config(&mut conf, None)
+            .expect("Polyphase with equal capture and playback rates should validate");
+    }
+
+    #[test]
+    fn polyphase_without_rate_adjust_validates() {
+        let yaml = polyphase_config_yaml(false);
+        let mut conf: Configuration = yaml_serde::from_str(&yaml).unwrap();
+        validate_config(&mut conf, None).expect("Polyphase without rate_adjust should validate");
     }
 }

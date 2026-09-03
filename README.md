@@ -1491,8 +1491,9 @@ The resampler type is given by `type`, and the available options are:
 * AsyncSinc
 * AsyncPoly
 * Synchronous
+* Polyphase
 
-The types `AsyncPoly` and `AsyncSinc` need additional parameters, see each type below for details.
+The types `AsyncPoly` and `AsyncSinc` need additional parameters, and `Polyphase` accepts one optional parameter. See each type below for details.
 
 ### `AsyncSinc`: Asynchronous resampling with anti-aliasing
 
@@ -1612,14 +1613,68 @@ The `Synchronous` type takes no additional parameters:
     type: Synchronous
 ```
 
+### `Polyphase`: Audiophile linear-phase FIR upsampler
+
+The `Polyphase` resampler is a long-tap linear-phase polyphase FIR engine
+intended for audiophile playback chains that feed a fixed-rate DAC.
+
+It **only upsamples**: `capture_samplerate` must be strictly below
+`samplerate`, and a configuration that does not satisfy this is rejected at
+validation time. The ratio is **fixed** at construction (use `AsyncSinc` if
+`enable_rate_adjust: true` is needed). When `follow_capture_samplerate` is on,
+the engine is rebuilt at the new rate; if the new capture rate is not one this
+engine can handle, it logs a warning and falls back to `Synchronous` rather
+than interrupting playback.
+
+Parameters:
+
+| Parameter | Required | Default | Description                                                            |
+|-----------|:--------:|:-------:|------------------------------------------------------------------------|
+| `taps`    | no       | 8192    | Per-branch tap count. Higher is a steeper transition, at more CPU.      |
+
+There is no branch-count or filter-character setting. The number of polyphase
+branches `L` follows from the exact rational ratio between the two rates,
+`L = samplerate / gcd(capture_samplerate, samplerate)`:
+
+| Conversion         | Branches `L` | Coefficient table at `taps: 8192` |
+|--------------------|:------------:|:---------------------------------:|
+| 44.1 kHz -> 96 kHz | 320          | 10.5 MB                           |
+| 88.2 kHz -> 96 kHz | 160          | 5.3 MB                            |
+| 48 kHz -> 96 kHz   | 2            | 66 kB                             |
+
+Because every output sample lands exactly on a branch, the phase is integer
+arithmetic and there is no interpolation between branches and no drift. Only
+`L / 2 + 1` branches are stored: the prototype is symmetric, so the upper
+branches are the time-reverse of the lower ones. The table size is
+`(L / 2 + 1) * taps * 8` bytes, as listed above.
+
+The prototype is a Kaiser-windowed sinc designed for 140 dB stopband
+attenuation, and its cutoff is placed so that the **stopband edge**, rather
+than the -6 dB point, sits at the source Nyquist. Nothing from the transition
+band images into the output. The trade-off is that a short filter loses top
+octave: at `taps: 8192` for 44.1 kHz -> 96 kHz the passband is flat to about
+22.0 kHz, but at `taps: 256` it is only flat to about 20.3 kHz. Use a large
+`taps` value, and note the cost is linear in `taps`.
+
+Example:
+```
+  resampler:
+    type: Polyphase
+    taps: 8192
+```
+
+A full example configuration is provided at
+[exampleconfigs/audiophile_resample.yml](exampleconfigs/audiophile_resample.yml).
+
 ### Rate adjust via resampling
 When using the rate adjust feature to match capture and playback devices,
 one of the "Async" types must be used.
 These asynchronous resamplers do not rely on a fixed resampling ratio.
 When rate adjust is enabled the resampling ratio is dynamically adjusted in order to compensate
 for drifts and mismatches between the input and output sample clocks.
-Using the "Synchronous" type with rate adjust enabled will print warnings,
-and any rate adjust request will be ignored.
+Using the "Synchronous" or "Polyphase" type with rate adjust enabled is rejected at
+config validation time (these have a fixed ratio and would have to be rebuilt
+to track drift, which would defeat their purpose).
 The next section explains the rate-adjust logic in detail.
 
 ## Rate adjust: what problem it solves, and how it works
